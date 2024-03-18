@@ -1,4 +1,5 @@
 #include "csr.h"
+#include "nearfar.h"
 #include <vector>
 #include <queue>
 #include <tuple>
@@ -6,11 +7,11 @@
 #include <sys/time.h>
 #include <math.h>
 
-double getTimeStamp() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (double)tv.tv_usec / 1000000 + tv.tv_sec;
-}
+// double getTimeStamp() {
+//     struct timeval tv;
+//     gettimeofday(&tv, NULL);
+//     return (double)tv.tv_usec / 1000000 + tv.tv_sec;
+// }
 
 
 void dijkstra(const CSRGraph& g, std::vector<edge_data_type>& dists) {
@@ -56,7 +57,7 @@ void dijkstra(const CSRGraph& g, std::vector<edge_data_type>& dists) {
 
 }
 
-__global__ const edge_data_type MAX_VAL = UINT_MAX;
+// __global__ const edge_data_type MAX_VAL = UINT_MAX;
 __global__ void bf_iter(CSRGraph g, edge_data_type* last_d, edge_data_type* new_d) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
 
@@ -236,14 +237,14 @@ void wf_impl(CSRGraph& g, edge_data_type* dists) {
     *qlen = 1;
 
     start = getTimeStamp();
-    while (*qlen) {
+    while (*qlen > 0) {
         printf("Iter %d\n",*qlen);
         index_type len = *qlen;
         *qlen = 0;
  
         wf_iter<<<(len + 512 - 1) / 512,512>>>(d_g, d_d, q1, len,q2, qlen);
         cudaDeviceSynchronize();
-        // printf("res %d\n",*qlen);
+        printf("res %d\n",*qlen);
         index_type* tmp = q1;
         q1 = q2;
         q2 = tmp;
@@ -261,7 +262,14 @@ int main(int argc, char** argv) {
     CSRGraph g, gg;
     double start,end = 0;
     
-    g.read("../inputs/rmat20.gr");
+    if (argc != 2){
+        printf("usage program <dataset path>\n");
+        return 1; 
+    }
+
+    
+    //g.read("../inputs/rmat20.gr");
+    g.read(argv[1]); 
     // init_trivial(g);
 
 
@@ -278,7 +286,7 @@ int main(int argc, char** argv) {
     check_cuda(cudaMallocHost(&h_d, g.nnodes * sizeof(edge_data_type)));
 
     start = getTimeStamp();
-    wf_impl(g, h_d);
+    nf_impl(g, h_d);
     end = getTimeStamp();
     double gpu_time = end - start;
     printf("Total GPU time: %f\n",gpu_time);
