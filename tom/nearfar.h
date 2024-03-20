@@ -9,6 +9,20 @@ double getTimeStamp() {
 }
 
 
+edge_data_type calculate_delta(CSRGraph g){
+    //delta as warp size * average weight / average degree
+    //calcuate average edge weight
+    unsigned long ew = 0; 
+    for (int i = 0; i < g.nedges; i++){
+        ew += g.edge_data[i]; 
+    }
+    ew = ew / g.nedges; 
+    //calculate average edge degree as total # of edges / total # of nodes
+    edge_data_type d = (g.nedges / g.nnodes);
+    printf("average degree %d, average weight %d, delta %d \n", d, ew, 32 * ew / d);
+    return 32 * ew / d; 
+}
+
 __global__ const edge_data_type MAX_VAL = UINT_MAX;
 __global__ void nf_iter(CSRGraph g, edge_data_type* d, edge_data_type delta, index_type* last_near_pile, index_type last_near_len, index_type* new_near_pile, 
 index_type* new_near_len, index_type* new_far_pile, index_type* new_far_len) {
@@ -87,6 +101,7 @@ void nf_impl(CSRGraph& g, edge_data_type* dists) {
     check_cuda(cudaMalloc(&near2, (g.nedges + 1) / 2 * sizeof(index_type)));
     check_cuda(cudaMalloc(&far1, (g.nedges + 1) * sizeof(index_type)));
     check_cuda(cudaMalloc(&far2, (g.nedges + 1) * sizeof(index_type)));
+
     // Set first q entry to 0 (source) TODO: other sources
     check_cuda(cudaMemset(near1, 0, sizeof(index_type)));
     index_type* near_len = NULL, *far_len = NULL;
@@ -98,8 +113,10 @@ void nf_impl(CSRGraph& g, edge_data_type* dists) {
     printf("weight %d \n", g.getWeight(0,0)); 
     start = getTimeStamp();
     int iter = 0; 
-    //todo: delta as warp size * average weight / average degree
-    edge_data_type delta = 200; 
+
+    //calculate delta for graph 
+    edge_data_type delta = calculate_delta(g); 
+
     while (*far_len > 0 || *near_len > 0) {
         printf("Iter %d, near batch %d, far batch %d, delta %d\n",iter, *near_len, *far_len, delta);
         index_type old_near_len = *near_len;
@@ -108,20 +125,27 @@ void nf_impl(CSRGraph& g, edge_data_type* dists) {
         nf_iter<<<(old_near_len + 512 - 1) / 512,512>>>(d_g, d_d, delta, near1, old_near_len, near2, near_len, far2, far_len);
         cudaDeviceSynchronize();
         
-        printf("after update, near batch %d, far batch %d\n", *near_len, *far_len); 
+        //printf("after update, near batch %d, far batch %d\n", *near_len, *far_len); 
+
+        if (*far_len == 0 && *near_len == 0)
+            break;
+
         if (*near_len == 0){
-            //todo: need to use a while loop to update delta until near batch has something
-            //used up all near pile, time to update delta and split far pile into new near, far 
-            delta += delta; 
+
             index_type old_far_len = *far_len;
-            *far_len = 0; 
-            *near_len = 0; 
-            far_split<<<(old_far_len + 512 - 1) / 512,512>>>(d_d, delta, far2, old_far_len, near1, near_len, far1, far_len);
-            cudaDeviceSynchronize();
+
+            while (*near_len == 0){
+                //keep adding delta until we have something in near batch 
+                delta += delta; 
+                *far_len = 0; 
+                *near_len = 0; 
+                far_split<<<(old_far_len + 512 - 1) / 512,512>>>(d_d, delta, far2, old_far_len, near1, near_len, far1, far_len);
+                cudaDeviceSynchronize();
+            }
             index_type* tmp = far1;
             far1 = far2;
             far2 = tmp; 
-            printf("after delta_update, near batch %d, far batch %d , delta %d\n", *near_len, *far_len, delta); 
+            //printf("after delta_update, near batch %d, far batch %d , delta %d\n", *near_len, *far_len, delta); 
         }
         else{
             //continue working on near pile, switch near pile, keep adding to same far pile
@@ -129,6 +153,8 @@ void nf_impl(CSRGraph& g, edge_data_type* dists) {
             near1 = near2;
             near2 = tmp; 
         }
+
+        iter += 1; 
 
     }
     end = getTimeStamp();
