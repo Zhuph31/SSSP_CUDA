@@ -13,23 +13,24 @@ EXECUTABLE_NAME=sssp
 
 
 # Files
-CU_SOURCE_FILES=\
+CU_SOURCE_FILE_NAMES=\
     main.cu \
     bellman-ford.cu \
 	workfront-sweep.cu \
 	csr.cu \
 	dijkstra.cu
+CU_SOURCE_FILES = $(CU_SOURCE_FILE_NAMES:%=$(SRC)/%)
 
 CPP_SOURCE_FILES=
 
 # Folders
-SRC=./
+SRC=src
 BIN=build
 OBJ=$(BIN)
 
 
 EXECUTABLE_FILES = $(EXECUTABLE_NAME:%=%)
-CPP_OBJECT_FILES     = $(CPP_SOURCE_FILES:%.cpp=$(OBJ)/%.o)
+CPP_OBJECT_FILES = $(CPP_SOURCE_FILES:%.cpp=$(OBJ)/%.o)
 CU_OBJECT_FILES  = $(CU_SOURCE_FILES:%.cu=$(OBJ)/%.o)
 
 

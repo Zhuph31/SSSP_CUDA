@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
     CSRGraph g, gg;
     double start,end = 0;
     
-    g.read("../inputs/rmat22.gr");
+    g.read("inputs/rmat22.gr");
     // init_trivial_graph(g);
 
 
