@@ -1,139 +1,8 @@
-/*
-   csr_graph.h
-
-   Implements a CSR Graph. Part of the GGC source code. 
-   Interface derived from LonestarGPU.
-
-   Copyright (C) 2014--2016, The University of Texas at Austin
-
-   See LICENSE.TXT for copyright license.
-
-   Author: Sreepathi Pai <sreepai@ices.utexas.edu> 
-*/
-
-#ifndef LSG_CSR_GRAPH
-#define LSG_CSR_GRAPH
-
-#include "common.cuh"
+#include "csr.h"
 
 #include <fstream>
-#include <stdio.h>
-#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
-#include <assert.h>
-
-static void check_cuda_error(const cudaError_t e, const char *file, const int line)
-{
-  if (e != cudaSuccess) {
-    fprintf(stderr, "%s:%d: %s (%d)\n", file, line, cudaGetErrorString(e), e);
-    exit(1);
-  }
-}
-
-template <typename T>
-static void check_retval(const T retval, const T expected, const char *file, const int line) {
-  if(retval != expected) {
-    fprintf(stderr, "%s:%d: Got %d, expected %d\n", file, line, retval, expected);
-    exit(1);
-  }
-}
-
-inline static __device__ __host__ int roundup(int a, int r) {
-  return ((a + r - 1) / r) * r;
-}
-
-inline static __device__ __host__ int GG_MIN(int x, int y) {
-  if(x > y) return y; else return x;
-}
-
-#define check_cuda(x) check_cuda_error(x, __FILE__, __LINE__)
-#define check_rv(r, x) check_retval(r, x, __FILE__, __LINE__)
-
-
-
-// Adapted from LSG CSRGraph.h
-
-
-
-// very simple implementation
-struct CSRGraph {
-  unsigned read(char file[]);
-  void copy_to_gpu(struct CSRGraph &copygraph);
-  void copy_to_cpu(struct CSRGraph &copygraph);
-
-  CSRGraph();
-
-  unsigned init();
-  unsigned allocOnHost();
-  unsigned allocOnDevice();
-  void progressPrint(unsigned maxii, unsigned ii);
-  unsigned readFromGR(char file[]);
-
-  unsigned deallocOnHost();
-  unsigned deallocOnDevice();
-  void dealloc();
-
-  __device__ __host__ bool valid_node(index_type node) {
-    return (node < nnodes);
-  }
-
-  __device__ __host__ bool valid_edge(index_type edge) {
-    return (edge < nedges);
-  }
-
-  __device__ __host__ index_type getOutDegree(unsigned src) {
-    assert(src < nnodes);
-    return row_start[src+1] - row_start[src];
-  };
-
-  __device__ __host__ index_type getDestination(unsigned src, unsigned edge) {
-      assert(src < nnodes);
-      assert(edge < getOutDegree(src));
-
-      index_type abs_edge = row_start[src] + edge;
-      assert(abs_edge < nedges);
-      
-      return edge_dst[abs_edge];
-  };
-
-  __device__ __host__ index_type getAbsDestination(unsigned abs_edge) {
-    assert(abs_edge < nedges);
-  
-    return edge_dst[abs_edge];
-  };
-
-  __device__ __host__ index_type getFirstEdge(unsigned src) {
-    assert(src <= nnodes); // <= is okay
-    return row_start[src];
-  };
-
-  __device__ __host__ edge_data_type    getWeight(unsigned src, unsigned edge) {
-  assert(src < nnodes);
-  assert(edge < getOutDegree(src));
-
-  index_type abs_edge = row_start[src] + edge;
-  assert(abs_edge < nedges);
-  
-  return edge_data[abs_edge];
-    
-  };
-
-  __device__ __host__ edge_data_type    getAbsWeight(unsigned abs_edge) {
-  assert(abs_edge < nedges);
-  
-  return edge_data[abs_edge];
-    
-  };
-
-  index_type nnodes, nedges;
-  index_type *row_start; // row_start[node] points into edge_dst, node starts at 0, row_start[nnodes] = nedges
-  index_type *edge_dst;
-  edge_data_type *edge_data;
-  node_data_type *node_data; 
-  bool device_graph;
-
-};
 
 CSRGraph::CSRGraph() {
   init();
@@ -306,4 +175,65 @@ void CSRGraph::copy_to_gpu(struct CSRGraph &copygraph) {
   check_cuda(cudaMemcpy(copygraph.row_start, row_start, (nnodes+1) * sizeof(index_type), cudaMemcpyHostToDevice));
 }
 
-#endif// LSG_CSR_GRAPH
+
+void init_trivial_graph(CSRGraph& g) {
+    g.nnodes = 6;
+    g.nedges = 16;
+    g.row_start = (index_type *)malloc((g.nnodes+1)*sizeof(index_type));
+    g.edge_dst = (index_type *)malloc(g.nedges*sizeof(edge_data_type));
+    g.edge_data = (edge_data_type *)malloc(g.nedges*sizeof(edge_data_type));
+    g.node_data = (node_data_type *)malloc(g.nnodes*sizeof(edge_data_type));
+
+    g.row_start[0] = 0;
+    g.row_start[1] = 2;
+    g.row_start[2] = 5;
+    g.row_start[3] = 9;
+    g.row_start[4] = 11;
+    g.row_start[5] = 13;
+    g.row_start[6] = 16;
+
+    g.edge_dst[0] = 1;
+    g.edge_dst[1] = 2;
+
+    g.edge_dst[2] = 0;
+    g.edge_dst[3] = 2;
+    g.edge_dst[4] = 3;
+
+    g.edge_dst[5] = 0;
+    g.edge_dst[6] = 1;
+    g.edge_dst[7] = 4;
+    g.edge_dst[8] = 5;
+
+    g.edge_dst[9] = 1;
+    g.edge_dst[10] = 5;
+
+    g.edge_dst[11] = 2;
+    g.edge_dst[12] = 5;
+
+    g.edge_dst[13] = 2;
+    g.edge_dst[14] = 3;
+    g.edge_dst[15] = 4;
+
+    g.edge_data[0] = 2;
+    g.edge_data[1] = 4;
+
+    g.edge_data[2] = 2;
+    g.edge_data[3] = 1;
+    g.edge_data[4] = 6;
+
+    g.edge_data[5] = 4;
+    g.edge_data[6] = 1;
+    g.edge_data[7] = 2;
+    g.edge_data[8] = 3;
+
+    g.edge_data[9] = 6;
+    g.edge_data[10] = 5;
+
+    g.edge_data[11] = 2;
+    g.edge_data[12] = 4;
+
+    g.edge_data[13] = 3;
+    g.edge_data[14] = 5;
+    g.edge_data[15] = 4;
+}
+
