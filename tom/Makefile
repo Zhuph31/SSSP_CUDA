@@ -8,23 +8,79 @@ CUDAFLAGS= $(aflags) -std=c++17 -arch=compute_86 -MD -MP
 LIBS= -lcudart
 LIBDIRS=
 INCDIRS=
-EXE=main
-OBJS=main.o 
 AUTODEPS=$(OBJS:.o=.d)
+EXECUTABLE_NAME=sssp
 
-.PHONY: all clean
-all: $(EXE)
 
-$(EXE): $(OBJS)
-	$(NVCC) $(CUDAFLAGS) $(INCDIRS) $(LIBDIRS) $^ $(LIBS) -o $(EXE)
+# Files
+CU_SOURCE_FILES=\
+    main.cu \
+    bellman-ford.cu \
+	workfront-sweep.cu \
+	csr.cu \
+	dijkstra.cu
+
+CPP_SOURCE_FILES=
+
+# Folders
+SRC=./
+BIN=build
+OBJ=$(BIN)
+
+
+EXECUTABLE_FILES = $(EXECUTABLE_NAME:%=%)
+CPP_OBJECT_FILES     = $(CPP_SOURCE_FILES:%.cpp=$(OBJ)/%.o)
+CU_OBJECT_FILES  = $(CU_SOURCE_FILES:%.cu=$(OBJ)/%.o)
+
+
+$(info $$EXECUTABLE_FILES = $(EXECUTABLE_FILES))
+$(info $$CU_OBJECT_FILES = $(CU_OBJECT_FILES))
+$(info $$CPP_OBJECT_FILES = $(CPP_OBJECT_FILES))
+
+build: $(EXECUTABLE_FILES)
 
 clean:
-	rm -f *.d *.o $(EXE)
+	rm -r -f $(BIN) $(EXECUTABLE_FILES)
 
-%.o: %.cu
+
+
+
+.PHONY: build clean
+
+
+
+$(EXECUTABLE_FILES): $(CU_OBJECT_FILES) $(CPP_OBJECT_FILES)
+	@echo Building $@
+	$(NVCC) $(CUDAFLAGS) $(INCDIRS) $(LIBDIRS) $^ $(LIBS) -o $@
+
+
+$(CU_OBJECT_FILES): $(OBJ)/%.o: %.cu
+	@mkdir -p $(@D)
+	@echo Compiling $<
 	$(NVCC) -dc $(CUDAFLAGS) $(INCDIRS) $< -o $@
 
-%.o: %.cpp
-	$(CC) -c $(CXXFLAGS) $(INCDIRS) $< -o $@
+$(CPP_OBJECT_FILES): $(OBJ)/%.o: %.cpp
+	@mkdir -p $(@D)
+	@echo Compiling $<
+	$(CC) -c $(CXXFLAGS) $(INCDIRS) $< -o build/$@
 
--include $(AUTODEPS)
+
+# .PHONY: all clean
+# all: $(EXE)
+
+
+
+# $(EXE): $(OBJS)
+# 	$(NVCC) $(CUDAFLAGS) $(INCDIRS) $(LIBDIRS) $^ $(LIBS) -o $(EXE)
+
+# clean:
+# 	rm -f *.d *.o $(EXE)
+
+# %.o: %.cu
+# 	$(NVCC) -dc $(CUDAFLAGS) $(INCDIRS) $< -o build/$@
+
+# %.o: %.cpp
+# 	$(CC) -c $(CXXFLAGS) $(INCDIRS) $< -o build/$@
+
+# -include $(AUTODEPS)
+# $(shell mkdir -p $(DIRS))

@@ -2,17 +2,52 @@
 #define COMMON_H
 
 #include <sys/time.h>
+#include <stdio.h>
+#include <fcntl.h>
 
 //TODO: make this template data
 typedef unsigned index_type; // should be size_t, but GPU chokes on size_t
 typedef unsigned edge_data_type;
 typedef int node_data_type;
+const edge_data_type MAX_VAL = UINT_MAX;
 
-double getTimeStamp() {
+
+
+
+inline double getTimeStamp() {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (double)tv.tv_usec / 1000000 + tv.tv_sec;
 }
+
+static void check_cuda_error(const cudaError_t e, const char *file, const int line)
+{
+  if (e != cudaSuccess) {
+    fprintf(stderr, "%s:%d: %s (%d)\n", file, line, cudaGetErrorString(e), e);
+    exit(1);
+  }
+}
+template <typename T>
+static void check_retval(const T retval, const T expected, const char *file, const int line) {
+  if(retval != expected) {
+    fprintf(stderr, "%s:%d: Got %d, expected %d\n", file, line, retval, expected);
+    exit(1);
+  }
+}
+
+
+inline static __device__ __host__ int roundup(int a, int r) {
+  return ((a + r - 1) / r) * r;
+}
+
+inline static __device__ __host__ int GG_MIN(int x, int y) {
+  if(x > y) return y; else return x;
+}
+
+#define check_cuda(x) check_cuda_error(x, __FILE__, __LINE__)
+#define check_rv(r, x) check_retval(r, x, __FILE__, __LINE__)
+
+
 
 #if CUDART_VERSION >= 4000
 #define CUDA_DEVICE_SYNCHRONIZE( )   cudaDeviceSynchronize();
@@ -20,19 +55,6 @@ double getTimeStamp() {
 #define CUDA_DEVICE_SYNCHRONIZE( )   cudaThreadSynchronize();
 #endif
 
-#  define CUDA_CHECK_ERROR(errorMessage) {                                    \
-    cudaError_t err = cudaGetLastError();                                    \
-    if( cudaSuccess != err) {                                                \
-        fprintf(stderr, "Cuda error: %s in file '%s' in line %i : %s.\n",    \
-                errorMessage, __FILE__, __LINE__, cudaGetErrorString( err) );\
-        exit(EXIT_FAILURE);                                                  \
-    }                                                                        \
-    err = CUDA_DEVICE_SYNCHRONIZE();                                           \
-    if( cudaSuccess != err) {                                                \
-        fprintf(stderr, "Cuda error: %s in file '%s' in line %i : %s.\n",    \
-                errorMessage, __FILE__, __LINE__, cudaGetErrorString( err) );\
-        exit(EXIT_FAILURE);                                                  \
-    }                                                                        \
-    }
+
 
 #endif
