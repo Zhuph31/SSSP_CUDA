@@ -1,16 +1,10 @@
+#include "common.cuh"
 #include "csr.h"
 #include <vector>
 #include <queue>
 #include <tuple>
 #include <iostream>
-#include <sys/time.h>
 #include <math.h>
-
-double getTimeStamp() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (double)tv.tv_usec / 1000000 + tv.tv_sec;
-}
 
 
 void dijkstra(const CSRGraph& g, std::vector<edge_data_type>& dists) {
@@ -190,7 +184,7 @@ void bf_impl(CSRGraph& g, edge_data_type* dists) {
 }
 
 
-__global__ void wf_iter(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx) {
+__global__ void wf_iter(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx, index_type* scratch) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
 
     if (index < last_q_len) {
@@ -209,9 +203,10 @@ __global__ void wf_iter(CSRGraph g, edge_data_type* d, index_type* last_q, index
 
             if (new_w < nw) {
                 atomicMin(&d[n],new_w);
-                index_type q_idx = atomicAdd(pq_idx,1);
-                new_q[q_idx] = n;
-                // printf("Adding %d to q[%d]\n",n,q_idx);
+                if (atomicCAS(&scratch[n],0,index) == 0) {
+                    index_type q_idx = atomicAdd(pq_idx,1);
+                    new_q[q_idx] = n;
+                }
             }
         }
     }
@@ -227,13 +222,18 @@ void wf_impl(CSRGraph& g, edge_data_type* dists) {
     check_cuda(cudaMemset(&d_d[1], 0xFF,  (g.nnodes-1) * sizeof(edge_data_type)));
 
     index_type* q1, *q2 = NULL;
-    check_cuda(cudaMalloc(&q1, g.nedges * sizeof(index_type)));
-    check_cuda(cudaMalloc(&q2, g.nedges * sizeof(index_type)));
+    index_type* qscratch = NULL;
+    check_cuda(cudaMalloc(&q1, g.nnodes * sizeof(index_type)));
+    check_cuda(cudaMalloc(&q2, g.nnodes * sizeof(index_type)));
+    check_cuda(cudaMalloc(&qscratch, g.nnodes* sizeof(index_type)));
     // Set first q entry to 0 (source) TODO: other sources
     check_cuda(cudaMemset(q1, 0, sizeof(index_type)));
     index_type* qlen = NULL;
     check_cuda(cudaMallocManaged(&qlen, sizeof(index_type)));
     *qlen = 1;
+
+    //index_type* hq = NULL;
+    //cudaHostAlloc(&hq,g.nnodes*sizeof(index_type),cudaHostAllocDefault);
 
     start = getTimeStamp();
     while (*qlen) {
@@ -241,9 +241,10 @@ void wf_impl(CSRGraph& g, edge_data_type* dists) {
         index_type len = *qlen;
         *qlen = 0;
  
-        wf_iter<<<(len + 512 - 1) / 512,512>>>(d_g, d_d, q1, len,q2, qlen);
+        wf_iter<<<(len + 512 - 1) / 512,512>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+        check_cuda(cudaMemset(qscratch,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
-        // printf("res %d\n",*qlen);
+
         index_type* tmp = q1;
         q1 = q2;
         q2 = tmp;
@@ -261,7 +262,7 @@ int main(int argc, char** argv) {
     CSRGraph g, gg;
     double start,end = 0;
     
-    g.read("../inputs/rmat20.gr");
+    g.read("../inputs/rmat22.gr");
     // init_trivial(g);
 
 
@@ -275,7 +276,7 @@ int main(int argc, char** argv) {
 
 
     edge_data_type* h_d = NULL;
-    check_cuda(cudaMallocHost(&h_d, g.nnodes * sizeof(edge_data_type)));
+    check_cuda(cudaMallocHost(&h_d, g.nnodes * sizeof(edge_data_type),cudaHostAllocWriteCombined));
 
     start = getTimeStamp();
     wf_impl(g, h_d);

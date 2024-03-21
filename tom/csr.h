@@ -14,6 +14,8 @@
 #ifndef LSG_CSR_GRAPH
 #define LSG_CSR_GRAPH
 
+#include "common.cuh"
+
 #include <fstream>
 #include <stdio.h>
 #include <fcntl.h>
@@ -52,10 +54,7 @@ inline static __device__ __host__ int GG_MIN(int x, int y) {
 
 // Adapted from LSG CSRGraph.h
 
-//TODO: make this template data
-typedef unsigned index_type; // should be size_t, but GPU chokes on size_t
-typedef unsigned edge_data_type;
-typedef int node_data_type;
+
 
 // very simple implementation
 struct CSRGraph {
