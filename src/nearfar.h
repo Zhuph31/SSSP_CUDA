@@ -19,7 +19,7 @@ edge_data_type calculate_delta(CSRGraph g){
     ew = ew / g.nedges; 
     //calculate average edge degree as total # of edges / total # of nodes
     edge_data_type d = (g.nedges / g.nnodes);
-    printf("average degree %d, average weight %d, delta %d \n", d, ew, 32 * ew / d);
+    printf("average degree %d, average weight %lu, delta %lu \n", d, ew, 32 * ew / d);
     return 32 * ew / d; 
 }
 
