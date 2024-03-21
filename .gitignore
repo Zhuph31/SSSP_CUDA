@@ -1,10 +1,16 @@
+*
+!*/
+!*.*
+
+
 *.i
 *.ii
 *.gpu
 *.ptx
 *.cubin
 *.fatbin
+*.o
+*.d
 
-tom/*.o
-tom/*.d
 tom/main
+.vscode
