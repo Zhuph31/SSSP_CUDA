@@ -32,15 +32,17 @@ index_type* new_near_len, index_type* new_far_pile, index_type* new_far_len) {
     if (index < last_near_len) {
         index_type s_idx = last_near_pile[index];
         // somewhat baed on https://towardsdatascience.com/bellman-ford-single-source-shortest-path-algorithm-on-gpu-using-cuda-a358da20144b
-        for (int j = g.row_start[s_idx]; j < g.row_start[s_idx + 1]; j++) {
-            edge_data_type w = d[s_idx];
-            edge_data_type ew = g.edge_data[j];
-            index_type n = g.edge_dst[j];
-            edge_data_type nw = d[n];
-            edge_data_type new_w = ew + w;
-            // Check if the distance is already set to max then just take the max since,
-            if (w >= MAX_VAL){
-                new_w = MAX_VAL;
+        for (int j = g.row_start[s_idx]; j < g.row_start[s_idx + 1]; j++) { // range each edge for current node
+          edge_data_type w = d[s_idx]; // current approximation for departure
+                                       // node for current edge
+          edge_data_type ew = g.edge_data[j]; // the weight of current edge
+          index_type n = g.edge_dst[j]; // the destination node for current edge
+          edge_data_type nw = d[n];     // old approximation for node n
+          edge_data_type new_w = ew + w; // new approximation starting from j
+          // Check if the distance is already set to max then just take the max
+          // since,
+          if (w >= MAX_VAL) {
+            new_w = MAX_VAL;
             }
 
             if (new_w < nw) {
@@ -125,7 +127,7 @@ void nf_impl(CSRGraph& g, edge_data_type* dists) {
         nf_iter<<<(old_near_len + 512 - 1) / 512,512>>>(d_g, d_d, delta, near1, old_near_len, near2, near_len, far2, far_len);
         cudaDeviceSynchronize();
         
-        //printf("after update, near batch %d, far batch %d\n", *near_len, *far_len); 
+        printf("after update, near batch %d, far batch %d\n", *near_len, *far_len); 
 
         if (*far_len == 0 && *near_len == 0)
             break;
