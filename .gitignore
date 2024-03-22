@@ -15,3 +15,5 @@ build
 .cache
 compile_commands.json
 src/Makefile
+sssp
+build.sh
