@@ -23,7 +23,7 @@ edge_data_type calculate_delta(CSRGraph g){
     return 32 * ew / d; 
 }
 
-__global__ const edge_data_type MAX_VAL = UINT_MAX;
+const edge_data_type MAX_VAL = UINT_MAX;
 __global__ void nf_iter(CSRGraph g, edge_data_type* d, edge_data_type delta, index_type* last_near_pile, index_type last_near_len, index_type* new_near_pile, 
 index_type* new_near_len, index_type* new_far_pile, index_type* new_far_len) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
