@@ -10,3 +10,8 @@ src/*.d
 src/main
 inputs/*
 .vscode/*
+
+build
+.cache
+compile_commands.json
+src/Makefile
