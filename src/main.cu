@@ -2,6 +2,7 @@
 #include "csr.h"
 #include "bellman-ford.cuh"
 #include "workfront-sweep.cuh"
+#include "nearfar.cuh"
 #include "dijkstra.h"
 
 
@@ -27,8 +28,14 @@ bool compare(std::vector<edge_data_type>& cpu, edge_data_type* gpu) {
 int main(int argc, char** argv) {
     CSRGraph g, gg;
     double start,end = 0;
-    
-    g.read("inputs/rmat22.gr");
+
+    if (argc != 2){
+        printf("usage program <dataset path>\n");
+        return 1; 
+    }
+
+    g.read(argv[1]); 
+    //g.read("inputs/rmat22.gr");
     // init_trivial_graph(g);
 
 
@@ -45,7 +52,8 @@ int main(int argc, char** argv) {
     check_cuda(cudaMallocHost(&h_d, g.nnodes * sizeof(edge_data_type),cudaHostAllocWriteCombined));
 
     start = getTimeStamp();
-    workfront_sweep(g, h_d);
+    //workfront_sweep(g, h_d);
+    nearfar(g,h_d);
     end = getTimeStamp();
     double gpu_time = end - start;
     printf("Total GPU time: %f\n",gpu_time);
