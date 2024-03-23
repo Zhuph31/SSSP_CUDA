@@ -20,8 +20,7 @@ CU_SOURCE_FILE_NAMES=\
 	nearfar.cu \
 	csr.cu \
 	dijkstra.cu \
-	bucketing.cu \
-	utils.cc
+	bucketing.cu 
 
 CU_SOURCE_FILES = $(CU_SOURCE_FILE_NAMES:%=$(SRC)/%)
 

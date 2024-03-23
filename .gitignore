@@ -12,16 +12,10 @@
 *.fatbin
 *.o
 *.d
+.vscode
 
-src/*.o
-src/*.d
-src/main
-inputs/*
-.vscode/*
 
 build
-.cache
 compile_commands.json
 sssp
 build.sh
-.vscode
