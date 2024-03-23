@@ -41,11 +41,8 @@ __global__ void bucketing_iter(CSRGraph g, edge_data_type *d,
         if (new_w < delta) {
           q_idx = atomicAdd(near_len, 1);
           near[q_idx] = n;
-          // printf("put node %u into near pile, idx:%u\n", n, q_idx);
         } else {
-          // printf("far_len:%u\n", *far_len);
           q_idx = atomicAdd(far_len, 1); // ! could possibly cause far overflow
-          // printf("far_len updated to be:%u\n", *far_len);
           far[q_idx] = n;
           // printf("put node %u into far pile, idx:%u\n", n, q_idx);
         }
@@ -194,13 +191,9 @@ void bucketing_impl(CSRGraph &g, edge_data_type *dists) {
 
       // set current bucket size to 0 as they are all processed
       buckets_len[bucket_idx] = 0;
-      // printf("finished bucketing iter \n");
 
       // todo: possibly compact near & near_dis?
       // ? why do we need to sort here?
-
-      // printf("sorted near pile\n");
-      // printf("near len:%u\n", *near_len);
 
       // split near pile into buckets only when near pile is not empty
       if (*near_len > 0) {
@@ -218,22 +211,7 @@ void bucketing_impl(CSRGraph &g, edge_data_type *dists) {
         cudaDeviceSynchronize();
         // reset near len as near pile are distributed to buckets
         *near_len = 0;
-
-        // printf("splitted near pile into buckets\n");
       }
-
-      // debug bucket split result
-      // for (index_type i = 0; i < nBuckets; ++i) {
-      //   if (buckets_len[i] <= 0) {
-      //     printf("bucket %u empty\n", i);
-      //   } else {
-      //     printf("bucket %u size %u, ", i, buckets_len[i]);
-      //     for (index_type j = 0; j < buckets_len[i]; ++j) {
-      //       printf("%u, ", buckets[i * each_bucket_cap + j]);
-      //     }
-      //     printf("\n");
-      //   }
-      // }
 
       // todo: possibly compact bucket
 
@@ -252,43 +230,20 @@ void bucketing_impl(CSRGraph &g, edge_data_type *dists) {
 
       bucket_idx = min_bucket;
       ++iter;
-      // printf("bucket for next iteration:%u\n", bucket_idx);
-      // for (index_type i = 0; i < nBuckets; ++i) {
-      //   printf("bucket %u content:\n", i);
-      //   index_type *each_bucket = buckets + i * each_bucket_cap;
-      //   for (index_type j = 0; j < buckets_len[i]; ++j) {
-      //     printf("%u,", each_bucket[j]);
-      //   }
-      //   printf("\n");
-      // }
     }
-
-    // printf("all buckets are empty, dealing with far\n");
 
     // todo: compact far pile
 
     if (*far_len <= 0) {
-      // printf("done, break\n");
       break;
     }
 
     // far split
     while (*near_len < 1) {
       delta += delta;
-
-      // printf("before far split, far len:%u\n", *far_len);
-
-      // printf("debug far:\n");
-      // for (index_type i = 0; i < *far_len; ++i) {
-      //   printf("%u(%u), ", far[i], d_d[far[i]]);
-      // }
-
       far_split<<<(*far_len + 512 - 1) / 512, 512>>>(
           d_d, delta, far, far_len, near, near_len, far2, far2_len);
       cudaDeviceSynchronize();
-      // printf("near size:%u, far size:%u, far2 size:%u, delta:%u\n",
-      // *near_len,
-      //        *far_len, *far2_len, delta);
 
       index_type *tmp = far;
       far = far2;
@@ -296,23 +251,10 @@ void bucketing_impl(CSRGraph &g, edge_data_type *dists) {
 
       std::swap(far_len, far2_len);
       *far2_len = 0;
-      // printf("after swap, near size:%u, far size:%u, far2 size:%u\n",
-      // *near_len,
-      //        *far_len, *far2_len);
-
-      // printf("debug near:\n");
-      // for (index_type i = 0; i < *near_len; ++i) {
-      //   printf("%u(%u), ", near[i], d_d[near[i]]);
-      // }
-
-      // getchar();
     }
-
-    // printf("far split finish, far:%u, near:%u\n", *far_len, *near_len);
 
     // split near into buckets
     // ? evenly split based on delta ?
-    // printf("out loop before buckets split, delta:%u\n", delta);
     buckets_split<<<(*near_len + 512 - 1) / 512, 512>>>(
         delta, d_d, near, near_len, buckets, buckets_len, each_bucket_cap);
     cudaDeviceSynchronize();
@@ -331,7 +273,6 @@ void bucketing_impl(CSRGraph &g, edge_data_type *dists) {
     }
 
     bucket_idx = min_len_bucket;
-    // getchar();
   }
 
   end = getTimeStamp();
