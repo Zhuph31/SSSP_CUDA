@@ -1,9 +1,24 @@
-#include "csr.h"
-#include "utils.h"
-#include <sys/time.h>
-#include <thrust/sort.h>
+#include "bucketing.cuh"
+#include <stdint.h>
+#include <utility>
 
 const uint32_t nBuckets = 10;
+
+inline edge_data_type calculate_delta(CSRGraph g) {
+  // delta as warp size * average weight / average degree
+  // calcuate average edge weight
+  unsigned long ew = 0;
+  for (int i = 0; i < g.nedges; i++) {
+    ew += g.edge_data[i];
+  }
+  ew = ew / g.nedges;
+  // calculate average edge degree as total # of edges / total # of nodes
+  edge_data_type d = (g.nedges / g.nnodes);
+  printf("average degree %d, average weight %lu, delta %lu \n", d, ew,
+         32 * ew / d);
+  return 32 * ew / d;
+}
+
 
 __global__ void bucketing_iter(CSRGraph g, edge_data_type *d,
                                edge_data_type delta, index_type *bucket,
@@ -103,7 +118,7 @@ far_split(edge_data_type *d, edge_data_type delta, index_type *last_far_pile,
   }
 }
 
-void bucketing_impl(CSRGraph &g, edge_data_type *dists) {
+void bucketing(CSRGraph &g, edge_data_type *dists) {
   double start, end = 0;
   CSRGraph d_g;
   g.copy_to_gpu(d_g);
@@ -216,8 +231,7 @@ void bucketing_impl(CSRGraph &g, edge_data_type *dists) {
       // todo: possibly compact bucket
 
       // find the bucket with minimum size
-      index_type min_bucket_size = std::numeric_limits<index_type>::max(),
-                 min_bucket = 0;
+      index_type min_bucket_size = 0, min_bucket = 0;
       found_non_empty_bucket = false;
       for (index_type i = 0; i < nBuckets; ++i) {
         if (buckets_len[i] > 0 &&

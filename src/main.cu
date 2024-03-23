@@ -3,6 +3,7 @@
 #include "csr.h"
 #include "dijkstra.h"
 #include "nearfar.cuh"
+#include "bucketing.cuh"
 #include "workfront-sweep.cuh"
 
 #include <math.h>
