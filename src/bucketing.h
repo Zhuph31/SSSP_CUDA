@@ -111,7 +111,7 @@ void bucketing_impl(CSRGraph &g, edge_data_type *dists) {
   CSRGraph d_g;
   g.copy_to_gpu(d_g);
   edge_data_type *d_d = NULL;
-  check_cuda(cudaMallocManaged(&d_d, g.nnodes * sizeof(edge_data_type)));
+  check_cuda(cudaMalloc(&d_d, g.nnodes * sizeof(edge_data_type)));
   // Initialize for source node = 0. Otherwise need to change this
   check_cuda(
       cudaMemset(&d_d[1], 0xFF, (g.nnodes - 1) * sizeof(edge_data_type)));
@@ -129,14 +129,13 @@ void bucketing_impl(CSRGraph &g, edge_data_type *dists) {
   index_type each_bucket_cap = g.nedges;
   index_type bucket_total_cap = each_bucket_cap * nBuckets;
 
-  check_cuda(
-      cudaMallocManaged(&buckets, bucket_total_cap * sizeof(index_type)));
-  check_cuda(cudaMallocManaged(&near, g.nedges * sizeof(index_type)));
-  check_cuda(cudaMallocManaged(
+  check_cuda(cudaMalloc(&buckets, bucket_total_cap * sizeof(index_type)));
+  check_cuda(cudaMalloc(&near, g.nedges * sizeof(index_type)));
+  check_cuda(cudaMalloc(
       &far,
       g.nedges * 2 *
           sizeof(index_type))); // ! how large does far need to avoid overflow ?
-  check_cuda(cudaMallocManaged(
+  check_cuda(cudaMalloc(
       &far2,
       g.nedges * 2 *
           sizeof(index_type))); // ! how large does far need to avoid overflow ?
@@ -264,13 +263,12 @@ void bucketing_impl(CSRGraph &g, edge_data_type *dists) {
       // }
     }
 
-    printf("all buckets are empty, dealing with far\n");
-    // getchar();
+    // printf("all buckets are empty, dealing with far\n");
 
     // todo: compact far pile
 
     if (*far_len <= 0) {
-      printf("done, break\n");
+      // printf("done, break\n");
       break;
     }
 
