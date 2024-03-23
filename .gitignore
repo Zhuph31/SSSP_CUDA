@@ -1,9 +1,17 @@
+*
+!*/
+!*.*
+!Makefile
+!*/Makefile
+
 *.i
 *.ii
 *.gpu
 *.ptx
 *.cubin
 *.fatbin
+*.o
+*.d
 
 src/*.o
 src/*.d
@@ -14,6 +22,6 @@ inputs/*
 build
 .cache
 compile_commands.json
-src/Makefile
 sssp
 build.sh
+.vscode
