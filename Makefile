@@ -19,7 +19,8 @@ CU_SOURCE_FILE_NAMES=\
 	workfront-sweep.cu \
 	nearfar.cu \
 	csr.cu \
-	dijkstra.cu 
+	dijkstra.cu \
+	bucketing.cu 
 
 CU_SOURCE_FILES = $(CU_SOURCE_FILE_NAMES:%=$(SRC)/%)
 

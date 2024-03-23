@@ -4,7 +4,6 @@
 !Makefile
 !*/Makefile
 
-
 *.i
 *.ii
 *.gpu
@@ -13,6 +12,10 @@
 *.fatbin
 *.o
 *.d
-
 .vscode
 inputs
+
+build
+compile_commands.json
+sssp
+build.sh

@@ -3,6 +3,7 @@
 #include "bellman-ford.cuh"
 #include "workfront-sweep.cuh"
 #include "nearfar.cuh"
+#include "bucketing.cuh"
 #include "dijkstra.h"
 
 
