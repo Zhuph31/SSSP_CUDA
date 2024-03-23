@@ -16,23 +16,20 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 75)
 endif()
 
-option(USE_CUDA "Use CUDA" ON)
-
 file(GLOB cpu_source_files "${CMAKE_SOURCE_DIR}/src/*.cc")
 file(GLOB gpu_source_files "${CMAKE_SOURCE_DIR}/src/*.cu")
 
-# Modern CMake
-if(USE_CUDA)
-    enable_language("CUDA")
-    add_executable(sssp ${cpu_source_files} ${gpu_source_files})
-else(USE_CUDA)
-    add_executable(sssp ${cpu_source_files})
-endif()
+enable_language("CUDA")
+add_executable(sssp ${cpu_source_files} ${gpu_source_files})
 
 message(STATUS "USE_CUDA: ${USE_CUDA}")
 if(USE_CUDA)
     add_definitions(-DUSE_CUDA)
 endif()
 
+
+target_compile_options(sssp PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:
+                       -g -G
+                       >)
 
 target_link_libraries(sssp Thrust)
