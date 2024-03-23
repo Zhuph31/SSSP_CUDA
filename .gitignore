@@ -13,7 +13,7 @@
 *.o
 *.d
 .vscode
-
+inputs
 
 build
 compile_commands.json
