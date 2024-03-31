@@ -18,6 +18,8 @@ __global__ void wf_iter(CSRGraph g, edge_data_type* d, index_type* last_q, index
                 new_w = MAX_VAL;
             }
 
+            printf("source %u, dst %u, new_w %u\n", s_idx, n, new_w);
+
             if (new_w < nw) {
                 atomicMin(&d[n],new_w);
                 if (atomicCAS(&scratch[n],0,index) == 0) {
@@ -79,83 +81,122 @@ __global__ void wf_coop_iter_impl1(CSRGraph g, edge_data_type* d, index_type* la
 }
 
 
-__device__ index_type bisect_left(index_type *block, index_type lo, index_type hi, index_type value){
-    index_type mid;
-    while (lo < hi){
-        mid = lo + (hi - lo) / 2; 
-        if (block[mid] < value)
-            lo = mid + 1;
-        else
-            hi = mid; 
+
+__device__ index_type bisect_right(index_type *block, index_type lo, index_type hi, index_type value){
+    // index_type mid;
+    // while (lo < hi){
+    //     mid = lo + (hi - lo) / 2; 
+    //     if (block[mid] > value)
+    //         hi = mid;
+    //     else
+    //         lo = mid + 1;
+
+    //     return (lo > 0) ? lo - 1 : lo;
+
+    // }
+
+    for (int i = 0; i < hi - 1; i++){
+        if (block[i] <= value && block[i + 1] > value)
+            return i; 
     }
-    
-    return (lo > 0) ? lo - 1 : lo; 
+    return 0;
 }
 
 
 
 
 
-#define BLOCK_DIM_X 128
+#define THREAD_PER_BLOCK 512
 __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx,  index_type* scratch) {
     
     //one for start, one for end.
-    __shared__ index_type block_row_offset[BLOCK_DIM_X * 2];
-    index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
+    __shared__ index_type source_vertices[THREAD_PER_BLOCK];
+    __shared__ index_type offset_start[THREAD_PER_BLOCK];
+    __shared__ index_type num_neighbors[THREAD_PER_BLOCK]; 
+
+    __shared__ index_type total_neighbors;
+
+
+
+    index_type global_index = threadIdx.x + (blockDim.x * blockIdx.x);
+    index_type local_index = threadIdx.x; 
+
+
+    //initialize source vertices, else bisect wont work properly
+    source_vertices[local_index] = 0; 
+    num_neighbors[local_index] = 0;
+    //offset_start[local_index] = 0;
+    
 
     //decide what each block work range is 
     index_type block_index_start = blockIdx.x * blockDim.x;
     index_type block_index_end = block_index_start + blockDim.x;  
-    index_type s_idx; 
     //do not go beyond last_q_len
     block_index_end = min(block_index_end, last_q_len); 
-    __shared__ int max_index; 
-    max_index = -1;
 
-    if (index < block_index_end){
-        //load start and end offset into shared memory
-        s_idx = last_q[index];
-        block_row_offset[threadIdx.x * 2] = g.row_start[s_idx];
-        block_row_offset[threadIdx.x * 2 + 1] = g.row_start[s_idx + 1]; 
-        atomicAdd(&max_index, 2); 
-        printf("index %d, s_idx %d, start %d, end %d, max_index %d\n", index ,s_idx, g.row_start[s_idx], g.row_start[s_idx + 1], max_index);
+    if (global_index < block_index_end){
+        //load start and end offset and number of neighbors into shared memory
+        index_type s_idx = last_q[global_index];
+        source_vertices[local_index] = s_idx; 
+        offset_start[local_index] = g.row_start[s_idx];
+        num_neighbors[local_index] = g.row_start[s_idx + 1] - g.row_start[s_idx]; 
+
+        //printf("block_idx %d, global_index %d, block_end %d, num_neighbors %d, source %d\n", blockIdx.x, global_index, block_index_end, num_neighbors[local_index], s_idx);
+        
     }
     __syncthreads();
 
+    /****************************** Replace with scan ********************************************************/
+    //add total num_neighbors to determine total work, replace with block level exclusive scan also get sum
+    if (local_index == 0){
+        total_neighbors = num_neighbors[0];
+        num_neighbors[0] = 0; 
+        index_type temp = 0; 
+        for (int i = 1; i < THREAD_PER_BLOCK; i++){
+            temp = num_neighbors[i];
+            num_neighbors[i] = total_neighbors;
+            total_neighbors += temp;
+        }
 
-    index_type row_offset = threadIdx.x + block_row_offset[0];
-    index_type block_max = block_row_offset[max_index];
+        //printf("block_id %d, total neighbors per block %d \n", blockIdx.x, total_neighbors);
+    }
 
-    //all thread work on one item in the offset array 
-    //example offset_array 0, 2, 8, 16, 19, a block have 8 threads
-    //first work on 0, 2, 8, then work on 8, 16, last work on 16, 19
-    while (row_offset < block_max){
+    __syncthreads(); 
+    
+    /*********************************************************************************************************/
+    //each take on a task
+    for (index_type work_index = local_index; work_index < total_neighbors; work_index += THREAD_PER_BLOCK){
 
-        //find source index
-        s_idx = bisect_left(block_row_offset, 0, max_index, row_offset);
+        //find shared mem index, so we can find source, offset start, and degree
+        
+        index_type shared_mem_index = bisect_right(num_neighbors, 0, THREAD_PER_BLOCK, work_index);
+        index_type source = source_vertices[shared_mem_index];
+        index_type edge_index = offset_start[shared_mem_index] + work_index - num_neighbors[shared_mem_index];
 
-        edge_data_type w = d[s_idx];
-        edge_data_type ew = g.edge_data[row_offset];
-        index_type n = g.edge_dst[row_offset];
+        
+        //rest of code remains the same 
+        edge_data_type w = d[source];
+        edge_data_type ew = g.edge_data[edge_index];
+        index_type n = g.edge_dst[edge_index];
         edge_data_type nw = d[n];
         edge_data_type new_w = ew + w;
 
-        printf("working, row_offset %d, s_idx %d, d_idx %d, new_w %d, edge weight %d, weight %d\n", row_offset, s_idx, n, new_w, ew, w); 
         // Check if the distance is already set to max then just take the max since,
         if (w >= MAX_VAL){
             new_w = MAX_VAL;
         }
 
+       //printf("local_index %u, worker_index %u, shared_mem_index %u, source %u, dst %d, new_w %d\n", local_index, work_index, shared_mem_index, source, n, new_w);
 
         if (new_w < nw) {
             atomicMin(&d[n],new_w);
-            if (atomicCAS(&scratch[n],0,index) == 0) {
+            if (atomicCAS(&scratch[n],0,1) == 0) {
                 index_type q_idx = atomicAdd(pq_idx,1);
                 new_q[q_idx] = n;
             }
         }
 
-        row_offset += blockDim.x; 
+         
     }
     
 }
@@ -188,20 +229,25 @@ void workfront_sweep(CSRGraph& g, edge_data_type* dists) {
     //cudaHostAlloc(&hq,g.nnodes*sizeof(index_type),cudaHostAllocDefault);
 
     start = getTimeStamp();
+
+    int itr = 0;
     while (*qlen) {
         printf("Iter %d\n",*qlen);
         index_type len = *qlen;
         *qlen = 0;
  
-        //wf_iter<<<(len + 512 - 1) / 512,512>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
-        wf_coop_iter_impl1<<<(len + 128 - 1) / 128,128>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
-        //wf_coop_iter_impl2<<<(len + 128 - 1) / 128,128>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+        //wf_iter<<<(len + THREAD_PER_BLOCK - 1) / THREAD_PER_BLOCK,THREAD_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+        //wf_coop_iter_impl1<<<(len + 128 - 1) / 128,128>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+        wf_coop_iter_impl2<<<(len + THREAD_PER_BLOCK - 1) / THREAD_PER_BLOCK, THREAD_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
         check_cuda(cudaMemset(qscratch,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
 
         index_type* tmp = q1;
         q1 = q2;
         q2 = tmp;
+
+
+        itr += 1;
     }
     end = getTimeStamp();
     double gpu_time = end - start;
