@@ -110,6 +110,30 @@ unsigned CSRGraph::readFromGR(char file[]) {
   return 0;
 }
 
+void CSRGraph::writeToCSR(char file[]) {
+  FILE* f = fopen(file,"wb");
+  if (f == NULL) {
+    printf("couldn't open file %s\n",file);
+    return;
+  }
+  // Write metadata
+  fwrite(&this->nnodes, sizeof(index_type), 1, f);
+  fwrite(&this->nnodes, sizeof(index_type), 1, f);
+  fwrite(&this->nedges, sizeof(index_type), 1, f);
+
+  // Write data
+
+    fwrite(this->row_start, sizeof(index_type),
+            this->nnodes + 1, f);
+    fwrite(this->edge_dst, sizeof(index_type),
+            this->nedges, f);
+    fwrite(this->edge_data, sizeof(edge_data_type),
+            this->nedges, f);
+
+  fclose(f);
+
+}
+
 void CSRGraph::progressPrint(unsigned maxii, unsigned ii) {
   const unsigned nsteps = 10;
   unsigned ineachstep = (maxii / nsteps);

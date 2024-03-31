@@ -38,6 +38,7 @@ int main(int argc, char** argv) {
     g.read(argv[1]); 
     //g.read("inputs/rmat22.gr");
     // init_trivial_graph(g);
+    // g.writeToCSR("out.csr");
 
 
     std::vector<edge_data_type> out_cpu;
@@ -53,12 +54,17 @@ int main(int argc, char** argv) {
     check_cuda(cudaMallocHost(&h_d, g.nnodes * sizeof(edge_data_type),cudaHostAllocWriteCombined));
 
     start = getTimeStamp();
-    //workfront_sweep(g, h_d);
-    nearfar(g,h_d);
+    workfront_sweep(g, h_d);
+    // nearfar(g,h_d);
     end = getTimeStamp();
     double gpu_time = end - start;
     printf("Total GPU time: %f\n",gpu_time);
 
+
     compare(out_cpu,h_d);
+    for (int i = 0; i < 40; i++) {
+        printf("%d ",h_d[i]);
+    }
+    printf("\n");
     return 0;
 }
