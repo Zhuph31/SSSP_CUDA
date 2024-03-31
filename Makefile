@@ -17,8 +17,11 @@ CU_SOURCE_FILE_NAMES=\
     main.cu \
     bellman-ford.cu \
 	workfront-sweep.cu \
+	nearfar.cu \
 	csr.cu \
-	dijkstra.cu
+	dijkstra.cu \
+	bucketing.cu 
+
 CU_SOURCE_FILES = $(CU_SOURCE_FILE_NAMES:%=$(SRC)/%)
 
 CPP_SOURCE_FILES=
