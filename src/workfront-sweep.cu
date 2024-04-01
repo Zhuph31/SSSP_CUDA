@@ -1,5 +1,7 @@
 #include "workfront-sweep.cuh"
 
+#define THREAD_PER_BLOCK 512
+
 
 __global__ void wf_iter(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx, index_type* scratch) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
@@ -18,7 +20,7 @@ __global__ void wf_iter(CSRGraph g, edge_data_type* d, index_type* last_q, index
                 new_w = MAX_VAL;
             }
 
-            printf("source %u, dst %u, new_w %u\n", s_idx, n, new_w);
+            //printf("source %u, dst %u, new_w %u\n", s_idx, n, new_w);
 
             if (new_w < nw) {
                 atomicMin(&d[n],new_w);
@@ -83,30 +85,30 @@ __global__ void wf_coop_iter_impl1(CSRGraph g, edge_data_type* d, index_type* la
 
 
 __device__ index_type bisect_right(index_type *block, index_type lo, index_type hi, index_type value){
-    // index_type mid;
-    // while (lo < hi){
-    //     mid = lo + (hi - lo) / 2; 
-    //     if (block[mid] > value)
-    //         hi = mid;
-    //     else
-    //         lo = mid + 1;
 
-    //     return (lo > 0) ? lo - 1 : lo;
+    if (value >= block[hi - 1])
+        return hi - 1; // if all elemenst in the scan result are smaller than value, the source vertex is the last one 
 
-    // }
-
-    for (int i = 0; i < hi - 1; i++){
-        if (block[i] <= value && block[i + 1] > value)
-            return i; 
+    index_type mid;
+    while (lo < hi){
+        mid = lo + (hi - lo) / 2; 
+        if (block[mid] > value)
+            hi = mid;
+        else
+            lo = mid + 1;
     }
-    return hi - 1; // if all elemenst in the scan result are smaller than value, the source vertex is the last one 
+    return (lo > 0) ? lo - 1 : lo;
+    
+    // for (int i = 0; i < hi - 1; i++){
+    //     if (block[i] <= value && block[i + 1] > value)
+    //         return i; 
+    // }
+    // return hi - 1; // if all elemenst in the scan result are smaller than value, the source vertex is the last one 
 }
 
 
 
 
-
-#define THREAD_PER_BLOCK 512
 __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx,  index_type* scratch) {
     
     //one for start, one for end.
@@ -232,12 +234,12 @@ void workfront_sweep(CSRGraph& g, edge_data_type* dists) {
 
     int itr = 0;
     while (*qlen) {
-        printf("Iter %d\n",*qlen);
+        printf("Iter %d, qlen %d\n",itr, *qlen);
         index_type len = *qlen;
         *qlen = 0;
  
         //wf_iter<<<(len + THREAD_PER_BLOCK - 1) / THREAD_PER_BLOCK,THREAD_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
-        //wf_coop_iter_impl1<<<(len + 128 - 1) / 128,128>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+        //wf_coop_iter_impl1<<<(len + THREAD_PER_BLOCK - 1) / THREAD_PER_BLOCK,THREAD_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
         wf_coop_iter_impl2<<<(len + THREAD_PER_BLOCK - 1) / THREAD_PER_BLOCK, THREAD_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
         check_cuda(cudaMemset(qscratch,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
