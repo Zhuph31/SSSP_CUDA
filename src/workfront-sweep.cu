@@ -99,7 +99,7 @@ __device__ index_type bisect_right(index_type *block, index_type lo, index_type 
         if (block[i] <= value && block[i + 1] > value)
             return i; 
     }
-    return 0;
+    return hi - 1; // if all elemenst in the scan result are smaller than value, the source vertex is the last one 
 }
 
 
