@@ -139,7 +139,7 @@ void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists) {
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 #define BLOCK_SIZE 512
-__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* frontier_in, index_type* frontier_out, index_type n, index_type* block_offsets) {//}, index_type* helper) {
+__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* frontier_in, index_type* frontier_out, index_type n, index_type* block_offsets) {
     __shared__ index_type vertices[BLOCK_SIZE];
     __shared__ index_type first_edge_offset[BLOCK_SIZE];
     __shared__ index_type output_offset[BLOCK_SIZE];
@@ -268,19 +268,16 @@ void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
     *m_N = 1;
     check_cuda(cudaMemcpy(frontier1,&source, sizeof(index_type), cudaMemcpyHostToDevice));
 
-    // index_type* helper = NULL;
-    // cudaMalloc(&helper, 4*g.nnodes);
 
     start = getTimeStamp();
 
     index_type iter = 0;
-    while(*m_N) {//} && iter < 4) {
+    while(*m_N) {
         index_type n = *m_N;
         *m_N = 0;
         printf("\n\n\nIter %d\n",n);
-        // cudaMemset(helper, 0, 4*g.nnodes);
 
-        wf_frontier_kernel<<<(n + BLOCK_SIZE-1)/BLOCK_SIZE,BLOCK_SIZE>>>(d_g, d_dists, frontier1, frontier2, n, m_N);//, helper);
+        wf_frontier_kernel<<<(n + BLOCK_SIZE-1)/BLOCK_SIZE,BLOCK_SIZE>>>(d_g, d_dists, frontier1, frontier2, n, m_N);
         cudaDeviceSynchronize();
         printf("Res %d\n",*m_N);
 
