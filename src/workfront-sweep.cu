@@ -139,7 +139,7 @@ void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists) {
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 #define BLOCK_SIZE 512
-__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* frontier_in, index_type* frontier_out, index_type n, index_type* block_offsets) {
+__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* frontier_in, index_type* frontier_out, index_type n, index_type* block_offsets) {//}, index_type* helper) {
     __shared__ index_type vertices[BLOCK_SIZE];
     __shared__ index_type first_edge_offset[BLOCK_SIZE];
     __shared__ index_type output_offset[BLOCK_SIZE];
@@ -159,6 +159,10 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
         index_type v = frontier_in[gidx];
         if (v != UINT_MAX) {
             vertices[tidx] = v;
+            // if (helper[v]) {
+            //     printf("BAD! Vertex %d already grabbed!\n",v);
+            // }
+            // helper[v] = 1;
             index_type row_start =  g.row_start[v];
             first_edge_offset[tidx] = row_start;
             degree = g.row_start[v+1] - row_start;
@@ -166,26 +170,26 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
             vertices[tidx] = UINT_MAX;
         }
     }
-    if (gidx == 0) {
-    printf("Thread %d has node %d with degree %d\n",tidx, vertices[tidx], degree);
-    }
+    // if (gidx == 0) {
+    // printf("Thread %d has node %d with degree %d\n",tidx, vertices[tidx], degree);
+    // }
 
     __syncthreads();
 
     index_type block_aggregate = 0;
     BlockScan(temp_storage).ExclusiveSum(degree, degree, block_aggregate);
     output_offset[tidx] = degree;
-    if (gidx == 0) {
-    printf("Block aggregate %d\n",block_aggregate);
-    }
+    // if (gidx == 0) {
+    // printf("Block aggregate %d\n",block_aggregate);
+    // }
     __syncthreads();
 
     if (tidx == 0 && block_aggregate) {
         block_offset[0] = atomicAdd(block_offsets,block_aggregate);
     }
-    if (gidx == 0) {
-    printf("\nBlock totals %d\n",*block_offsets);
-    }
+    // if (gidx == 0) {
+    // printf("\nBlock totals %d\n",*block_offsets);
+    // }
 
 
     __syncthreads();
@@ -209,19 +213,24 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
 
         index_type edge_offset = edge_id - output_offset[v_id];
         index_type v_in = vertices[v_id];
-        if (v_in == 0) printf("Got vertex 0! Edge_id %d\n", edge_id);
+        // if (v_in == 0) printf("Got vertex 0! Edge_id %d\n", edge_id);
         index_type edge_dst = g.edge_dst[first_edge_offset[v_id]+ edge_offset];
         edge_data_type ew = g.edge_data[first_edge_offset[v_id]+ edge_offset];
+        // printf("exploring edge %d\n",first_edge_offset[v_id]+ edge_offset);
         edge_data_type vw = d[v_in];
         edge_data_type old_dw = d[edge_dst];
         edge_data_type new_dw = vw + ew;
+
+        index_type out_val = UINT_MAX;
         if (new_dw < old_dw) {
             atomicMin(&d[edge_dst], new_dw);
-            frontier_out[block_offset[0] + edge_id] = edge_dst;
-        } else {
-            frontier_out[block_offset[0] + edge_id] = UINT_MAX;
+            out_val = edge_dst;
         }
-        if (d[edge_dst] == 0) printf("\nEdge ID %d. Using local vert %d (%d)source weight: %d. Dest: %d (%d). new: %d \n", edge_id, v_id, v_in, vw, edge_dst, old_dw, new_dw);
+        frontier_out[block_offset[0] + edge_id] = out_val;
+        // } else {
+        //     frontier_out[block_offset[0] + edge_id] = UINT_MAX;
+        // }
+        // if (d[edge_dst] == 0) printf("\nEdge ID %d. Using local vert %d (%d)source weight: %d. Dest: %d (%d). new: %d \n", edge_id, v_id, v_in, vw, edge_dst, old_dw, new_dw);
 
     }
 
@@ -236,8 +245,10 @@ __global__ void filter_frontier(index_type* frontier_in, index_type* frontier_ou
         index_type v = frontier_in[gidx];
         index_type out = UINT_MAX;
         if (v != UINT_MAX) {
-            if (!atomicCAS(&visited[v],iteration, iteration)) {
+            if (atomicExch(&visited[v],iteration) != iteration) {
                 out = v;
+            } else {
+                // printf("Skipping vertex %d\n",v);
             }
         }
         frontier_out[gidx] = out;
@@ -257,22 +268,26 @@ void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
     *m_N = 1;
     check_cuda(cudaMemcpy(frontier1,&source, sizeof(index_type), cudaMemcpyHostToDevice));
 
+    // index_type* helper = NULL;
+    // cudaMalloc(&helper, 4*g.nnodes);
+
     start = getTimeStamp();
 
     index_type iter = 0;
-    while(*m_N && iter < 5) {
+    while(*m_N) {//} && iter < 4) {
         index_type n = *m_N;
         *m_N = 0;
         printf("\n\n\nIter %d\n",n);
+        // cudaMemset(helper, 0, 4*g.nnodes);
 
-        wf_frontier_kernel<<<(n + BLOCK_SIZE-1)/BLOCK_SIZE,BLOCK_SIZE>>>(d_g, d_dists, frontier1, frontier2, n, m_N);
+        wf_frontier_kernel<<<(n + BLOCK_SIZE-1)/BLOCK_SIZE,BLOCK_SIZE>>>(d_g, d_dists, frontier1, frontier2, n, m_N);//, helper);
         cudaDeviceSynchronize();
         printf("Res %d\n",*m_N);
 
 
         // filter
         n = *m_N;
-        filter_frontier<<<(n + BLOCK_SIZE-1)/BLOCK_SIZE,BLOCK_SIZE>>>(frontier2, frontier1,n,visited,iter);
+        filter_frontier<<<(n + BLOCK_SIZE-1)/BLOCK_SIZE,BLOCK_SIZE>>>(frontier2, frontier1,n,visited,iter+1);
         cudaDeviceSynchronize();
 
         iter++;
