@@ -1,6 +1,6 @@
 #include "workfront-sweep.cuh"
 
-#define THREAD_PER_BLOCK 512
+#define THREADS_PER_BLOCK 256
 
 
 __global__ void wf_iter(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx, index_type* scratch) {
@@ -112,9 +112,9 @@ __device__ index_type bisect_right(index_type *block, index_type lo, index_type 
 __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx,  index_type* scratch) {
     
     //one for start, one for end.
-    __shared__ index_type source_vertices[THREAD_PER_BLOCK];
-    __shared__ index_type offset_start[THREAD_PER_BLOCK];
-    __shared__ index_type num_neighbors[THREAD_PER_BLOCK]; 
+    __shared__ index_type source_vertices[THREADS_PER_BLOCK];
+    __shared__ index_type offset_start[THREADS_PER_BLOCK];
+    __shared__ index_type num_neighbors[THREADS_PER_BLOCK]; 
 
     __shared__ index_type total_neighbors;
 
@@ -154,7 +154,7 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
         total_neighbors = num_neighbors[0];
         num_neighbors[0] = 0; 
         index_type temp = 0; 
-        for (int i = 1; i < THREAD_PER_BLOCK; i++){
+        for (int i = 1; i < THREADS_PER_BLOCK; i++){
             temp = num_neighbors[i];
             num_neighbors[i] = total_neighbors;
             total_neighbors += temp;
@@ -167,11 +167,11 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
     
     /*********************************************************************************************************/
     //each take on a task
-    for (index_type work_index = local_index; work_index < total_neighbors; work_index += THREAD_PER_BLOCK){
+    for (index_type work_index = local_index; work_index < total_neighbors; work_index += THREADS_PER_BLOCK){
 
         //find shared mem index, so we can find source, offset start, and degree
         
-        index_type shared_mem_index = bisect_right(num_neighbors, 0, THREAD_PER_BLOCK, work_index);
+        index_type shared_mem_index = bisect_right(num_neighbors, 0, THREADS_PER_BLOCK, work_index);
         index_type source = source_vertices[shared_mem_index];
         index_type edge_index = offset_start[shared_mem_index] + work_index - num_neighbors[shared_mem_index];
 
@@ -238,9 +238,9 @@ void workfront_sweep(CSRGraph& g, edge_data_type* dists) {
         index_type len = *qlen;
         *qlen = 0;
  
-        //wf_iter<<<(len + THREAD_PER_BLOCK - 1) / THREAD_PER_BLOCK,THREAD_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
-        //wf_coop_iter_impl1<<<(len + THREAD_PER_BLOCK - 1) / THREAD_PER_BLOCK,THREAD_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
-        wf_coop_iter_impl2<<<(len + THREAD_PER_BLOCK - 1) / THREAD_PER_BLOCK, THREAD_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+        //wf_iter<<<(len + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK,THREADS_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+        //wf_coop_iter_impl1<<<(len + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK,THREADS_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+        wf_coop_iter_impl2<<<(len + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, THREADS_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
         check_cuda(cudaMemset(qscratch,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
 

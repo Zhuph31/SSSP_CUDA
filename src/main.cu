@@ -101,7 +101,6 @@ int main(int argc, char** argv) {
     //g.read("inputs/rmat22.gr");
     //init_trivial_graph(g);
 
-
     std::vector<edge_data_type> out_cpu;
 
     start = getTimeStamp();
@@ -115,8 +114,10 @@ int main(int argc, char** argv) {
     check_cuda(cudaMallocHost(&h_d, g.nnodes * sizeof(edge_data_type),cudaHostAllocWriteCombined));
 
     start = getTimeStamp();
+
     workfront_sweep(g, h_d);
     //nearfar(g,h_d);
+    
     end = getTimeStamp();
     double gpu_time = end - start;
     printf("Total GPU time: %f\n",gpu_time);
