@@ -3,6 +3,6 @@
 
 #include "csr.h"
 
-void workfront_sweep(CSRGraph& g, edge_data_type* dists);
+void workfront_sweep(CSRGraph& g, edge_data_type* dists, index_type source);
 
 #endif // WORKFRONT_SWEEP_H

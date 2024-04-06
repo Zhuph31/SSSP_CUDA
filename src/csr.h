@@ -34,6 +34,7 @@ struct CSRGraph {
   unsigned allocOnDevice();
   void progressPrint(unsigned maxii, unsigned ii);
   unsigned readFromGR(char file[]);
+  void writeToCSR(char file[]);
 
   unsigned deallocOnHost();
   unsigned deallocOnDevice();
