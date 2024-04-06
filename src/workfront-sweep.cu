@@ -87,8 +87,10 @@ void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index
     printf("GPU time: %f\n",gpu_time);
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-__global__ void wf_coop_iter_impl1(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx,  index_type* scratch) {
+template <int block_size, OutType out_type>
+__global__ void wf_coop_iter_impl1(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* out, index_type* pq_idx,  index_type* scratch) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
 
     __shared__ index_type block_row_start;
@@ -125,10 +127,15 @@ __global__ void wf_coop_iter_impl1(CSRGraph g, edge_data_type* d, index_type* la
             }
 
             if (new_w < nw) {
-                atomicMin(&d[n],new_w);
-                if (atomicCAS(&scratch[n],0,index) == 0) {
-                    index_type q_idx = atomicAdd(pq_idx,1);
-                    new_q[q_idx] = n;
+                if (out_type == OutType::QUEUE){
+                    atomicMin(&d[n],new_w);
+                    if (atomicCAS(&scratch[n],0,1) == 0) {
+                        index_type q_idx = atomicAdd(pq_idx,1);
+                        out[q_idx] = n;
+                    }
+                }
+                else if (out_type == OutType::TOUCHED){
+                    out[n] = 1;
                 }
             }
         }
@@ -153,18 +160,12 @@ __device__ index_type bisect_right(index_type *block, index_type lo, index_type 
             lo = mid + 1;
     }
     return (lo > 0) ? lo - 1 : lo;
-    
-    // for (int i = 0; i < hi - 1; i++){
-    //     if (block[i] <= value && block[i + 1] > value)
-    //         return i; 
-    // }
-    // return hi - 1; // if all elemenst in the scan result are smaller than value, the source vertex is the last one 
 }
 
 
 
-template <int block_size>
-__global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx,  index_type* scratch) {
+template <int block_size, OutType out_type>
+__global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* out, index_type* pq_idx,  index_type* scratch) {
     
     //one for start, one for end.
     __shared__ index_type source_vertices[block_size];
@@ -246,10 +247,15 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
        //printf("local_index %u, worker_index %u, shared_mem_index %u, source %u, dst %d, new_w %d\n", local_index, work_index, shared_mem_index, source, n, new_w);
 
         if (new_w < nw) {
-            atomicMin(&d[n],new_w);
-            if (atomicCAS(&scratch[n],0,1) == 0) {
-                index_type q_idx = atomicAdd(pq_idx,1);
-                new_q[q_idx] = n;
+            if (out_type == OutType::QUEUE){
+                atomicMin(&d[n],new_w);
+                if (atomicCAS(&scratch[n],0,1) == 0) {
+                    index_type q_idx = atomicAdd(pq_idx,1);
+                    out[q_idx] = n;
+                }
+            }
+            else if (out_type == OutType::TOUCHED){
+                out[n] = 1;
             }
         }
 
@@ -257,8 +263,6 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
     }
     
 }
-
-
 
 
 template <int block_size>
@@ -289,7 +293,7 @@ void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type s
         *qlen = 0;
  
         //wf_coop_iter_impl1<<<(len + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK,THREADS_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
-        wf_coop_iter_impl2<block_size><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+        wf_coop_iter_impl2<block_size, OutType::QUEUE><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
         check_cuda(cudaMemset(qscratch,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
 
@@ -304,6 +308,8 @@ void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type s
     double gpu_time = end - start;
     printf("GPU time: %f\n",gpu_time);
 }
+
+
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -346,6 +352,8 @@ void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_
         *qlen = 0;
  
         wf_iter_simple<OutType::TOUCHED><<<(len + block_size - 1) / block_size,block_size>>>(d_g, d_dists, q, len, touched,NULL, NULL);
+        //coop example, interface exactly the same 
+        //wf_coop_iter_impl2<block_size, OutType::TOUCHED><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_dists, q, len, touched,NULL, NULL);
         cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,touched,q,qlen,g.nnodes);
         check_cuda(cudaMemset(touched,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
