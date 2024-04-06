@@ -6,13 +6,13 @@
 #include <climits>
 
 
-void dijkstra(const CSRGraph& g, std::vector<edge_data_type>& dists) {
+void dijkstra(const CSRGraph& g, std::vector<edge_data_type>& dists, index_type source) {
     typedef std::tuple<index_type, edge_data_type> Node;
 
     auto cmp = [](Node left, Node right) { return (std::get<1>(left)) > (std::get<1>(right)); };
     std::priority_queue<Node,std::vector<Node>,decltype(cmp)> pq(cmp);
 
-    pq.push(Node{0,0});
+    pq.push(Node{source,0});
 
     dists.resize(g.nnodes, UINT_MAX);
     std::vector<bool> explored(g.nnodes);

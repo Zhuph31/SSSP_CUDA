@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
     std::vector<edge_data_type> out_cpu;
 
     start = getTimeStamp();
-    dijkstra(g, out_cpu);
+    dijkstra(g, out_cpu, 0);
     end = getTimeStamp();
     double cpu_time = end - start;
     printf("CPU time: %f\n",cpu_time);
@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
 
     start = getTimeStamp();
 
-    workfront_sweep(g, h_d);
+    workfront_sweep(g, h_d, 0);
     //nearfar(g,h_d);
     
     end = getTimeStamp();

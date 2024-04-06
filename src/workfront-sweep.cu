@@ -33,7 +33,8 @@ __global__ void wf_iter_aq(CSRGraph g, edge_data_type* d, index_type* last_q, in
     }
 }
 
-void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists) {
+template <int block_size>
+void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source) {
     double start,end = 0;
     index_type* q1, *q2 = NULL;
     index_type* qscratch = NULL;
@@ -41,7 +42,7 @@ void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists) {
     check_cuda(cudaMalloc(&q2, g.nnodes * sizeof(index_type)));
     check_cuda(cudaMalloc(&qscratch, g.nnodes* sizeof(index_type)));
     // Set first q entry to 0 (source) TODO: other sources
-    check_cuda(cudaMemset(q1, 0, sizeof(index_type)));
+    check_cuda(cudaMemcpy(q1, &source, sizeof(index_type), cudaMemcpyHostToDevice));
     index_type* qlen = NULL;
     check_cuda(cudaMallocManaged(&qlen, sizeof(index_type)));
     *qlen = 1;
@@ -57,7 +58,7 @@ void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists) {
         index_type len = *qlen;
         *qlen = 0;
  
-        wf_iter_aq<<<(len + 512 - 1) / 512,512>>>(d_g, d_dists, q1, len,q2, qlen, qscratch);
+        wf_iter_aq<<<(len + block_size - 1) / block_size,block_size>>>(d_g, d_dists, q1, len,q2, qlen, qscratch);
         check_cuda(cudaMemset(qscratch,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
 
@@ -150,13 +151,13 @@ __device__ index_type bisect_right(index_type *block, index_type lo, index_type 
 
 
 
-
+template <int block_size>
 __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx,  index_type* scratch) {
     
     //one for start, one for end.
-    __shared__ index_type source_vertices[THREADS_PER_BLOCK];
-    __shared__ index_type offset_start[THREADS_PER_BLOCK];
-    __shared__ index_type num_neighbors[THREADS_PER_BLOCK]; 
+    __shared__ index_type source_vertices[block_size];
+    __shared__ index_type offset_start[block_size];
+    __shared__ index_type num_neighbors[block_size]; 
 
     __shared__ index_type total_neighbors;
 
@@ -196,7 +197,7 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
         total_neighbors = num_neighbors[0];
         num_neighbors[0] = 0; 
         index_type temp = 0; 
-        for (int i = 1; i < THREADS_PER_BLOCK; i++){
+        for (int i = 1; i < block_size; i++){
             temp = num_neighbors[i];
             num_neighbors[i] = total_neighbors;
             total_neighbors += temp;
@@ -209,11 +210,11 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
     
     /*********************************************************************************************************/
     //each take on a task
-    for (index_type work_index = local_index; work_index < total_neighbors; work_index += THREADS_PER_BLOCK){
+    for (index_type work_index = local_index; work_index < total_neighbors; work_index += block_size){
 
         //find shared mem index, so we can find source, offset start, and degree
         
-        index_type shared_mem_index = bisect_right(num_neighbors, 0, THREADS_PER_BLOCK, work_index);
+        index_type shared_mem_index = bisect_right(num_neighbors, 0, block_size, work_index);
         index_type source = source_vertices[shared_mem_index];
         index_type edge_index = offset_start[shared_mem_index] + work_index - num_neighbors[shared_mem_index];
 
@@ -248,16 +249,16 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
 
 
 
-
-void workfront_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d) {
+template <int block_size>
+void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type source) {
     double start,end = 0;
     index_type* q1, *q2 = NULL;
     index_type* qscratch = NULL;
     check_cuda(cudaMalloc(&q1, g.nnodes * sizeof(index_type)));
     check_cuda(cudaMalloc(&q2, g.nnodes * sizeof(index_type)));
     check_cuda(cudaMalloc(&qscratch, g.nnodes* sizeof(index_type)));
-    // Set first q entry to 0 (source) TODO: other sources
-    check_cuda(cudaMemset(q1, 0, sizeof(index_type)));
+    // Set first q entry to source
+    check_cuda(cudaMemcpy(q1, &source, sizeof(index_type), cudaMemcpyHostToDevice));
     index_type* qlen = NULL;
     check_cuda(cudaMallocManaged(&qlen, sizeof(index_type)));
     *qlen = 1;
@@ -273,9 +274,8 @@ void workfront_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d) {
         index_type len = *qlen;
         *qlen = 0;
  
-        //wf_iter<<<(len + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK,THREADS_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
         //wf_coop_iter_impl1<<<(len + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK,THREADS_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
-        wf_coop_iter_impl2<<<(len + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, THREADS_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+        wf_coop_iter_impl2<block_size><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
         check_cuda(cudaMemset(qscratch,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
 
@@ -293,7 +293,7 @@ void workfront_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-__global__ void wf_iter_filter(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* scratch) {
+__global__ void wf_iter_filter(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* touched) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
 
     if (index < last_q_len) {
@@ -311,7 +311,7 @@ __global__ void wf_iter_filter(CSRGraph g, edge_data_type* d, index_type* last_q
 
             if (new_w < nw) {
                 atomicMin(&d[n],new_w);
-                scratch[n] = 1;
+                touched[n] = 1;
             }
         }
     }
@@ -322,7 +322,7 @@ __global__ void setup_id(index_type* out, index_type n) {
     if (index < n)  out[index] = index;
 }
 
-void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists) {
+void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source) {
     double start,end = 0;
     index_type* q = NULL;
     index_type* scan_indices = NULL;
@@ -332,8 +332,8 @@ void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists) {
     check_cuda(cudaMalloc(&scan_indices, g.nnodes* sizeof(index_type)));
     setup_id<<<(g.nnodes + 512 - 1),512>>>(scan_indices,g.nnodes);
 
-    // Set first q entry to 0 (source) TODO: other sources
-    check_cuda(cudaMemset(q, 0, sizeof(index_type)));
+    // Set first q entry to source
+    check_cuda(cudaMemcpy(q, &source, sizeof(index_type),cudaMemcpyHostToDevice));
     index_type* qlen = NULL;
     check_cuda(cudaMallocManaged(&qlen, sizeof(index_type)));
     *qlen = 1;
@@ -364,15 +364,15 @@ void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists) {
 
 ///////////////////////////////////////////////////////////////////////////////////////////
 
-#define BLOCK_SIZE 512
+template <int block_size>
 __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* frontier_in, index_type* frontier_out, index_type n, index_type* block_offsets) {
-    __shared__ index_type vertices[BLOCK_SIZE];
-    __shared__ index_type first_edge_offset[BLOCK_SIZE];
-    __shared__ index_type output_offset[BLOCK_SIZE];
+    __shared__ index_type vertices[block_size];
+    __shared__ index_type first_edge_offset[block_size];
+    __shared__ index_type output_offset[block_size];
     __shared__ uint64_t block_offset[1];
 
     // Specialize BlockScan for a 1D block of 128 threads on type int
-    typedef cub::BlockScan<index_type, BLOCK_SIZE> BlockScan;
+    typedef cub::BlockScan<index_type, block_size> BlockScan;
      
     // Allocate shared memory for BlockScan
     __shared__ typename BlockScan::TempStorage temp_storage;
@@ -420,12 +420,12 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
 
     __syncthreads();
 
-    for (index_type edge_id = tidx; edge_id < block_aggregate; edge_id += BLOCK_SIZE) {
+    for (index_type edge_id = tidx; edge_id < block_aggregate; edge_id += block_size) {
         // search for edge
         index_type v_id = 0;
         {
             index_type lo = 0;
-            index_type hi = BLOCK_SIZE;
+            index_type hi = block_size;
             while (lo != hi-1) {
                 v_id = lo + (hi - lo)/2;
                 if (edge_id >= output_offset[v_id]) {
@@ -459,9 +459,6 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
         // if (d[edge_dst] == 0) printf("\nEdge ID %d. Using local vert %d (%d)source weight: %d. Dest: %d (%d). new: %d \n", edge_id, v_id, v_in, vw, edge_dst, old_dw, new_dw);
 
     }
-
-
-
 }
 
 __global__ void filter_frontier(index_type* frontier_in, index_type* frontier_out, index_type n, index_type* visited, index_type iteration) {
@@ -481,8 +478,8 @@ __global__ void filter_frontier(index_type* frontier_in, index_type* frontier_ou
     }
 }
 
-
-void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source = 0) {
+template <int block_size>
+void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source) {
     double start,end = 0;
     index_type* frontier1, *frontier2 = NULL;
     check_cuda(cudaMalloc(&frontier1, g.nedges * sizeof(index_type)));
@@ -501,16 +498,15 @@ void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
     while(*m_N) {
         index_type n = *m_N;
         *m_N = 0;
-        printf("\n\n\nIter %d\n",n);
+        printf("Iter %d\n",n);
 
-        wf_frontier_kernel<<<(n + BLOCK_SIZE-1)/BLOCK_SIZE,BLOCK_SIZE>>>(d_g, d_dists, frontier1, frontier2, n, m_N);
+        wf_frontier_kernel<block_size><<<(n + block_size-1)/block_size,block_size>>>(d_g, d_dists, frontier1, frontier2, n, m_N);
         cudaDeviceSynchronize();
-        printf("Res %d\n",*m_N);
 
 
         // filter
         n = *m_N;
-        filter_frontier<<<(n + BLOCK_SIZE-1)/BLOCK_SIZE,BLOCK_SIZE>>>(frontier2, frontier1,n,visited,iter+1);
+        filter_frontier<<<(n + block_size-1)/block_size,block_size>>>(frontier2, frontier1,n,visited,iter+1);
         cudaDeviceSynchronize();
 
         iter++;
@@ -526,15 +522,16 @@ void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
 
 
 
-void workfront_sweep(CSRGraph& g, edge_data_type* dists) {
+void workfront_sweep(CSRGraph& g, edge_data_type* dists, index_type source) {
     CSRGraph d_g;
     g.copy_to_gpu(d_g);
     edge_data_type* d_d = NULL;
     check_cuda(cudaMalloc(&d_d, g.nnodes * sizeof(edge_data_type)));
     // Initialize for source node = 0. Otherwise need to change this
-    check_cuda(cudaMemset(&d_d[1], 0xFF,  (g.nnodes-1) * sizeof(edge_data_type)));
+    check_cuda(cudaMemset(&d_d[0], 0xFF,  (g.nnodes) * sizeof(edge_data_type)));
+    check_cuda(cudaMemset(&d_d[source], 0,  sizeof(edge_data_type)));
 
-    wf_sweep_frontier(g, d_g, d_d);    
+    wf_sweep_frontier<256>(g, d_g, d_d, source);    
 
 
     cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
