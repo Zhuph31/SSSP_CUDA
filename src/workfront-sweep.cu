@@ -9,6 +9,11 @@ enum OutType {
 };
 
 
+enum CoopType{
+    VANILLA,
+    FULL
+};
+
 template <OutType out_type>
 __global__ void wf_iter_simple(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* out, index_type* pq_idx, index_type* scratch) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
@@ -133,8 +138,9 @@ __global__ void wf_coop_iter_impl1(CSRGraph g, edge_data_type* d, index_type* la
             }
 
             if (new_w < nw) {
+
+                atomicMin(&d[n],new_w);
                 if (out_type == OutType::QUEUE){
-                    atomicMin(&d[n],new_w);
                     if (atomicCAS(&scratch[n],0,1) == 0) {
                         index_type q_idx = atomicAdd(pq_idx,1);
                         out[q_idx] = n;
@@ -253,8 +259,8 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
        //printf("local_index %u, worker_index %u, shared_mem_index %u, source %u, dst %d, new_w %d\n", local_index, work_index, shared_mem_index, source, n, new_w);
 
         if (new_w < nw) {
+            atomicMin(&d[n],new_w);
             if (out_type == OutType::QUEUE){
-                atomicMin(&d[n],new_w);
                 if (atomicCAS(&scratch[n],0,1) == 0) {
                     index_type q_idx = atomicAdd(pq_idx,1);
                     out[q_idx] = n;
@@ -271,7 +277,7 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
 }
 
 
-template <int block_size>
+template <int block_size, CoopType coop_impl>
 void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type source, bool verbose=false) {
     double start,end = 0;
     index_type* q1, *q2 = NULL;
@@ -297,9 +303,11 @@ void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type s
         }
         index_type len = *qlen;
         *qlen = 0;
- 
-        //wf_coop_iter_impl1<<<(len + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK,THREADS_PER_BLOCK>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
-        wf_coop_iter_impl2<block_size, OutType::QUEUE><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+
+        if (coop_impl == CoopType::VANILLA)
+            wf_coop_iter_impl1<block_size, OutType::QUEUE><<<(len + block_size - 1) / block_size,block_size>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+        else if (coop_impl == CoopType::FULL)
+            wf_coop_iter_impl2<block_size, OutType::QUEUE><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
         check_cuda(cudaMemset(qscratch,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
 
@@ -317,14 +325,66 @@ void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type s
 
 
 
-///////////////////////////////////////////////////////////////////////////////
-
 
 __global__ void setup_id(index_type* out, index_type n) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
     if (index < n)  out[index] = index;
 }
 
+
+
+template <int block_size, CoopType coop_impl>
+void wf_coop_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
+    double start,end = 0;
+    index_type* q = NULL;
+    index_type* scan_indices = NULL;
+    index_type* touched = NULL;
+    check_cuda(cudaMalloc(&q, g.nnodes * sizeof(index_type)));
+    check_cuda(cudaMalloc(&touched, g.nnodes* sizeof(index_type)));
+    check_cuda(cudaMalloc(&scan_indices, g.nnodes* sizeof(index_type)));
+    setup_id<<<(g.nnodes + block_size - 1),block_size>>>(scan_indices,g.nnodes);
+
+    // Set first q entry to source
+    check_cuda(cudaMemcpy(q, &source, sizeof(index_type),cudaMemcpyHostToDevice));
+    index_type* qlen = NULL;
+    check_cuda(cudaMallocManaged(&qlen, sizeof(index_type)));
+    *qlen = 1;
+
+    void* flg_tmp_store = NULL;
+    size_t flg_store_size = 0;
+    // index_type num_selected = 0;
+    cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,touched,q,qlen,g.nnodes);
+    check_cuda(cudaMalloc(&flg_tmp_store,flg_store_size));
+
+
+    start = getTimeStamp();
+    while (*qlen) {
+        if (verbose) {
+            printf("Iter %d\n",*qlen);
+        }
+        index_type len = *qlen;
+        *qlen = 0;
+
+        if (coop_impl == CoopType::VANILLA)
+            wf_coop_iter_impl1<block_size, OutType::TOUCHED><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_dists, q, len, touched,NULL, NULL);
+        else if (coop_impl == CoopType::FULL)
+            wf_coop_iter_impl2<block_size, OutType::TOUCHED><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_dists, q, len, touched,NULL, NULL);
+        cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,touched,q,qlen,g.nnodes);
+        check_cuda(cudaMemset(touched,0,g.nnodes*sizeof(index_type)));
+        cudaDeviceSynchronize();
+    }
+    end = getTimeStamp();
+    double gpu_time = end - start;
+    printf("GPU time: %f\n",gpu_time);
+
+    check_cuda(cudaFree(q));
+    check_cuda(cudaFree(touched));
+    check_cuda(cudaFree(scan_indices));
+    check_cuda(cudaFree(qlen));
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 template <int block_size>
 void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
     double start,end = 0;
@@ -627,11 +687,21 @@ void workfront_sweep_evaluation(CSRGraph& g, edge_data_type* dists, index_type s
         { wf_sweep_filter<128>, "filter_128" },
         { wf_sweep_filter<256>, "filter_256" },
         { wf_sweep_filter<512>, "filter_512" },
-        { wf_sweep_coop<32>, "coop_32" },
-        { wf_sweep_coop<64>, "coop_64" },
-        { wf_sweep_coop<128>, "coop_128" },
-        { wf_sweep_coop<256>, "coop_256" },
-        { wf_sweep_coop<512>, "coop_512" },
+        { wf_sweep_coop<32,CoopType::VANILLA>, "vanilla_coop_32" },
+        { wf_sweep_coop<64,CoopType::VANILLA>, "vanilla_coop_64" },
+        { wf_sweep_coop<128,CoopType::VANILLA>, "vanilla_coop_128" },
+        { wf_sweep_coop<256,CoopType::VANILLA>, "vanilla_coop_256" },
+        { wf_sweep_coop<512,CoopType::VANILLA>, "vanilla_coop_512" },
+        { wf_sweep_coop<32,CoopType::FULL>, "coop_32" },
+        { wf_sweep_coop<64,CoopType::FULL>, "coop_64" },
+        { wf_sweep_coop<128,CoopType::FULL>, "coop_128" },
+        { wf_sweep_coop<256,CoopType::FULL>, "coop_256" },
+        { wf_sweep_coop<512,CoopType::FULL>, "coop_512" },
+        { wf_coop_filter<32,CoopType::FULL>, "coop_filter_32" },
+        { wf_coop_filter<64,CoopType::FULL>, "coop_filter_64" },
+        { wf_coop_filter<128,CoopType::FULL>, "coop_filter_128" },
+        { wf_coop_filter<256,CoopType::FULL>, "coop_filter_256" },
+        { wf_coop_filter<512,CoopType::FULL>, "coop_filter_512" },
         { wf_sweep_frontier<32,OutType::FRONTIER>, "frontier_32" },
         { wf_sweep_frontier<64,OutType::FRONTIER>, "frontier_64" },
         { wf_sweep_frontier<128,OutType::FRONTIER>, "frontier_128" },
