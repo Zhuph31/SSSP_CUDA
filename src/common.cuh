@@ -56,5 +56,18 @@ inline static __device__ __host__ int GG_MIN(int x, int y) {
 #endif
 
 
+static inline bool compare(edge_data_type* cpu, edge_data_type* gpu, index_type n) {
+
+    for (int i = 0; i < n; i++) {
+        if (cpu[i] != gpu[i]) {
+            printf("Wrong at %d: %d!=%d\n",i,cpu[i],gpu[i]);
+            return false;
+        }
+    }
+
+    printf("Match!\n");
+    return true;
+}
+
 
 #endif

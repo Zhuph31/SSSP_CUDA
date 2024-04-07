@@ -2,8 +2,15 @@
 #include <cub/device/device_select.cuh>
 #include <cub/block/block_scan.cuh>
 
+enum OutType {
+    QUEUE,
+    TOUCHED,
+    FRONTIER
+};
 
-__global__ void wf_iter_aq(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx, index_type* scratch) {
+
+template <OutType out_type>
+__global__ void wf_iter_simple(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* out, index_type* pq_idx, index_type* scratch) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
 
     if (index < last_q_len) {
@@ -24,9 +31,13 @@ __global__ void wf_iter_aq(CSRGraph g, edge_data_type* d, index_type* last_q, in
 
             if (new_w < nw) {
                 atomicMin(&d[n],new_w);
-                if (atomicCAS(&scratch[n],0,index) == 0) {
-                    index_type q_idx = atomicAdd(pq_idx,1);
-                    new_q[q_idx] = n;
+                if (out_type == OutType::QUEUE) {
+                    if (atomicCAS(&scratch[n],0,index) == 0) {
+                        index_type q_idx = atomicAdd(pq_idx,1);
+                        out[q_idx] = n;
+                    }
+                } else if (out_type == OutType::TOUCHED) {
+                    out[n] = 1;
                 }
             }
         }
@@ -34,7 +45,7 @@ __global__ void wf_iter_aq(CSRGraph g, edge_data_type* d, index_type* last_q, in
 }
 
 template <int block_size>
-void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source) {
+void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
     double start,end = 0;
     index_type* q1, *q2 = NULL;
     index_type* qscratch = NULL;
@@ -54,11 +65,13 @@ void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index
 
     int itr = 0;
     while (*qlen) {
-        printf("Iter %d, qlen %d\n",itr, *qlen);
+        if (verbose) {
+            printf("Iter %d, qlen %d\n",itr, *qlen);
+        }
         index_type len = *qlen;
         *qlen = 0;
  
-        wf_iter_aq<<<(len + block_size - 1) / block_size,block_size>>>(d_g, d_dists, q1, len,q2, qlen, qscratch);
+        wf_iter_simple<OutType::QUEUE><<<(len + block_size - 1) / block_size,block_size>>>(d_g, d_dists, q1, len,q2, qlen, qscratch);
         check_cuda(cudaMemset(qscratch,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
 
@@ -72,9 +85,14 @@ void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index
     end = getTimeStamp();
     double gpu_time = end - start;
     printf("GPU time: %f\n",gpu_time);
+
+
+    check_cuda(cudaFree(q1));
+    check_cuda(cudaFree(q2));
+    check_cuda(cudaFree(qscratch));
+    check_cuda(cudaFree(qlen));
 }
 
-#define THREADS_PER_BLOCK 256
 
 __global__ void wf_coop_iter_impl1(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* new_q, index_type* pq_idx,  index_type* scratch) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
@@ -250,7 +268,7 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
 
 
 template <int block_size>
-void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type source) {
+void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type source, bool verbose=false) {
     double start,end = 0;
     index_type* q1, *q2 = NULL;
     index_type* qscratch = NULL;
@@ -270,7 +288,9 @@ void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type s
 
     int itr = 0;
     while (*qlen) {
-        printf("Iter %d, qlen %d\n",itr, *qlen);
+        if (verbose) {
+            printf("Iter %d, qlen %d\n",itr, *qlen);
+        }
         index_type len = *qlen;
         *qlen = 0;
  
@@ -293,36 +313,14 @@ void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type s
 
 ///////////////////////////////////////////////////////////////////////////////
 
-__global__ void wf_iter_filter(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* touched) {
-    index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
-
-    if (index < last_q_len) {
-        index_type s_idx = last_q[index];
-        for (int j = g.row_start[s_idx]; j < g.row_start[s_idx + 1]; j++) {
-            edge_data_type w = d[s_idx];
-            edge_data_type ew = g.edge_data[j];
-            index_type n = g.edge_dst[j];
-            edge_data_type nw = d[n];
-            edge_data_type new_w = ew + w;
-            // Check if the distance is already set to max then just take the max since,
-            if (w >= MAX_VAL){
-                new_w = MAX_VAL;
-            }
-
-            if (new_w < nw) {
-                atomicMin(&d[n],new_w);
-                touched[n] = 1;
-            }
-        }
-    }
-}
 
 __global__ void setup_id(index_type* out, index_type n) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
     if (index < n)  out[index] = index;
 }
 
-void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source) {
+template <int block_size>
+void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
     double start,end = 0;
     index_type* q = NULL;
     index_type* scan_indices = NULL;
@@ -330,7 +328,7 @@ void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_
     check_cuda(cudaMalloc(&q, g.nnodes * sizeof(index_type)));
     check_cuda(cudaMalloc(&touched, g.nnodes* sizeof(index_type)));
     check_cuda(cudaMalloc(&scan_indices, g.nnodes* sizeof(index_type)));
-    setup_id<<<(g.nnodes + 512 - 1),512>>>(scan_indices,g.nnodes);
+    setup_id<<<(g.nnodes + block_size - 1),block_size>>>(scan_indices,g.nnodes);
 
     // Set first q entry to source
     check_cuda(cudaMemcpy(q, &source, sizeof(index_type),cudaMemcpyHostToDevice));
@@ -347,11 +345,13 @@ void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_
 
     start = getTimeStamp();
     while (*qlen) {
-        printf("Iter %d\n",*qlen);
+        if (verbose) {
+            printf("Iter %d\n",*qlen);
+        }
         index_type len = *qlen;
         *qlen = 0;
  
-        wf_iter_filter<<<(len + 512 - 1) / 512,512>>>(d_g, d_dists, q, len, touched);
+        wf_iter_simple<OutType::TOUCHED><<<(len + block_size - 1) / block_size,block_size>>>(d_g, d_dists, q, len, touched,NULL, NULL);
         cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,touched,q,qlen,g.nnodes);
         check_cuda(cudaMemset(touched,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
@@ -360,12 +360,16 @@ void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_
     double gpu_time = end - start;
     printf("GPU time: %f\n",gpu_time);
 
+    check_cuda(cudaFree(q));
+    check_cuda(cudaFree(touched));
+    check_cuda(cudaFree(scan_indices));
+    check_cuda(cudaFree(qlen));
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////
 
-template <int block_size>
-__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* frontier_in, index_type* frontier_out, index_type n, index_type* block_offsets) {
+template <int block_size, OutType out_type>
+__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* frontier_in, index_type* out, index_type n, index_type* out_size, index_type* scratch) {
     __shared__ index_type vertices[block_size];
     __shared__ index_type first_edge_offset[block_size];
     __shared__ index_type output_offset[block_size];
@@ -410,8 +414,10 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
     // }
     __syncthreads();
 
-    if (tidx == 0 && block_aggregate) {
-        block_offset[0] = atomicAdd(block_offsets,block_aggregate);
+    if (out_type == OutType::FRONTIER) {
+        if (tidx == 0 && block_aggregate) {
+            block_offset[0] = atomicAdd(out_size,block_aggregate);
+        }
     }
     // if (gidx == 0) {
     // printf("\nBlock totals %d\n",*block_offsets);
@@ -447,12 +453,40 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
         edge_data_type old_dw = d[edge_dst];
         edge_data_type new_dw = vw + ew;
 
-        index_type out_val = UINT_MAX;
-        if (new_dw < old_dw) {
-            atomicMin(&d[edge_dst], new_dw);
-            out_val = edge_dst;
+        if (out_type == OutType::FRONTIER) {
+            index_type out_val = UINT_MAX;
+            if (new_dw < old_dw) {
+                atomicMin(&d[edge_dst], new_dw);
+                out_val = edge_dst;
+            }
+            out[block_offset[0] + edge_id] = out_val;
+        } else if (out_type == OutType::QUEUE) {
+            if (new_dw < old_dw) {
+                atomicMin(&d[edge_dst], new_dw);
+                if (atomicCAS(&scratch[edge_dst],0,gidx) == 0) {
+                    index_type q_idx = atomicAdd(out_size,1);
+                    out[q_idx] = edge_dst;
+                }
+            }
+        } else if (out_type == OutType::TOUCHED) {
+            if (new_dw < old_dw) {
+                atomicMin(&d[edge_dst], new_dw);           
+                out[edge_dst] = 1;
+            }
         }
-        frontier_out[block_offset[0] + edge_id] = out_val;
+
+
+
+
+                //         atomicMin(&d[n],new_w);
+                // if (out_type == OutType::QUEUE) {
+                //     if (atomicCAS(&scratch[n],0,index) == 0) {
+                //         index_type q_idx = atomicAdd(pq_idx,1);
+                //         out[q_idx] = n;
+                //     }
+                // } else if (out_type == OutType::TOUCHED) {
+                //     out[n] = 1;
+                // }
         // } else {
         //     frontier_out[block_offset[0] + edge_id] = UINT_MAX;
         // }
@@ -470,16 +504,14 @@ __global__ void filter_frontier(index_type* frontier_in, index_type* frontier_ou
         if (v != UINT_MAX) {
             if (atomicExch(&visited[v],iteration) != iteration) {
                 out = v;
-            } else {
-                // printf("Skipping vertex %d\n",v);
             }
         }
         frontier_out[gidx] = out;
     }
 }
 
-template <int block_size>
-void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source) {
+template <int block_size, OutType out_type>
+void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
     double start,end = 0;
     index_type* frontier1, *frontier2 = NULL;
     check_cuda(cudaMalloc(&frontier1, g.nedges * sizeof(index_type)));
@@ -491,6 +523,16 @@ void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
     *m_N = 1;
     check_cuda(cudaMemcpy(frontier1,&source, sizeof(index_type), cudaMemcpyHostToDevice));
 
+    index_type* scan_indices = NULL;
+    void* flg_tmp_store = NULL;
+    size_t flg_store_size = 0;
+    if (out_type == OutType::TOUCHED) {
+        check_cuda(cudaMalloc(&scan_indices, g.nnodes* sizeof(index_type)));
+        setup_id<<<(g.nnodes + block_size - 1),block_size>>>(scan_indices,g.nnodes);
+        // index_type num_selected = 0;
+        cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,frontier2,frontier1,m_N,g.nnodes);
+        check_cuda(cudaMalloc(&flg_tmp_store,flg_store_size));
+    }
 
     start = getTimeStamp();
 
@@ -498,40 +540,113 @@ void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
     while(*m_N) {
         index_type n = *m_N;
         *m_N = 0;
-        printf("Iter %d\n",n);
+        if (verbose) {
+            printf("Iter %d\n",n);
+        }
 
-        wf_frontier_kernel<block_size><<<(n + block_size-1)/block_size,block_size>>>(d_g, d_dists, frontier1, frontier2, n, m_N);
+        wf_frontier_kernel<block_size, out_type><<<(n + block_size-1)/block_size,block_size>>>(d_g, d_dists, frontier1, frontier2, n, m_N,NULL);
         cudaDeviceSynchronize();
 
 
         // filter
-        n = *m_N;
-        filter_frontier<<<(n + block_size-1)/block_size,block_size>>>(frontier2, frontier1,n,visited,iter+1);
-        cudaDeviceSynchronize();
+        if (out_type == OutType::FRONTIER) {
+            n = *m_N;
+            filter_frontier<<<(n + block_size-1)/block_size,block_size>>>(frontier2, frontier1,n,visited,iter+1);
+            cudaDeviceSynchronize();
+        } else if (out_type == OutType::TOUCHED) {
+            cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,frontier2,frontier1,m_N,g.nnodes);
+            check_cuda(cudaMemset(frontier2,0,g.nnodes*sizeof(index_type)));
+            cudaDeviceSynchronize();
+        }
+
 
         iter++;
     }
     end = getTimeStamp();
     double gpu_time = end - start;
     printf("GPU time: %f\n",gpu_time);
+
+    check_cuda(cudaFree(frontier1));
+    check_cuda(cudaFree(frontier2));
+    check_cuda(cudaFree(visited));
+    check_cuda(cudaFree(m_N));
 }
 
 
 
 /////////////////////////////////////////////////////////
 
-
+void initialize_dists(edge_data_type* d_d, index_type n, index_type source) {
+    check_cuda(cudaMemset(&d_d[0], 0xFF,  n * sizeof(edge_data_type)));
+    check_cuda(cudaMemset(&d_d[source], 0,  sizeof(edge_data_type)));
+}
 
 void workfront_sweep(CSRGraph& g, edge_data_type* dists, index_type source) {
     CSRGraph d_g;
     g.copy_to_gpu(d_g);
     edge_data_type* d_d = NULL;
     check_cuda(cudaMalloc(&d_d, g.nnodes * sizeof(edge_data_type)));
-    // Initialize for source node = 0. Otherwise need to change this
-    check_cuda(cudaMemset(&d_d[0], 0xFF,  (g.nnodes) * sizeof(edge_data_type)));
-    check_cuda(cudaMemset(&d_d[source], 0,  sizeof(edge_data_type)));
 
-    wf_sweep_frontier<256>(g, d_g, d_d, source);    
+    // Initialize for source node
+    initialize_dists(d_d, g.nnodes, source);
+
+    wf_sweep_frontier<256,OutType::TOUCHED>(g, d_g, d_d, source,true);
+
+    cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
+}
+
+
+struct Test {
+    void (*f)(CSRGraph&, CSRGraph&, edge_data_type*, index_type, bool);
+    const char* name;
+};
+
+void workfront_sweep_evaluation(CSRGraph& g, edge_data_type* dists, index_type source, edge_data_type* cpu) {
+    CSRGraph d_g;
+    g.copy_to_gpu(d_g);
+    edge_data_type* d_d = NULL;
+    check_cuda(cudaMalloc(&d_d, g.nnodes * sizeof(edge_data_type)));
+    // Initialize for source node
+
+    Test tests[] = {
+        { wf_sweep_atomicq<32>, "atomic_32" },
+        { wf_sweep_atomicq<64>, "atomic_64" },
+        { wf_sweep_atomicq<128>, "atomic_128" },
+        { wf_sweep_atomicq<256>, "atomic_256" },
+        { wf_sweep_atomicq<512>, "atomic_512" },
+        { wf_sweep_filter<32>, "filter_32" },
+        { wf_sweep_filter<64>, "filter_64" },
+        { wf_sweep_filter<128>, "filter_128" },
+        { wf_sweep_filter<256>, "filter_256" },
+        { wf_sweep_filter<512>, "filter_512" },
+        { wf_sweep_coop<32>, "coop_32" },
+        { wf_sweep_coop<64>, "coop_64" },
+        { wf_sweep_coop<128>, "coop_128" },
+        { wf_sweep_coop<256>, "coop_256" },
+        { wf_sweep_coop<512>, "coop_512" },
+        { wf_sweep_frontier<32,OutType::FRONTIER>, "frontier_32" },
+        { wf_sweep_frontier<64,OutType::FRONTIER>, "frontier_64" },
+        { wf_sweep_frontier<128,OutType::FRONTIER>, "frontier_128" },
+        { wf_sweep_frontier<256,OutType::FRONTIER>, "frontier_256" },
+        { wf_sweep_frontier<512,OutType::FRONTIER>, "frontier_512" },
+        { wf_sweep_frontier<32,OutType::TOUCHED>, "frontier_filt_32" },
+        { wf_sweep_frontier<64,OutType::TOUCHED>, "frontier_filt_64" },
+        { wf_sweep_frontier<128,OutType::TOUCHED>, "frontier_filt_128" },
+        { wf_sweep_frontier<256,OutType::TOUCHED>, "frontier_filt_256" },
+        { wf_sweep_frontier<512,OutType::TOUCHED>, "frontier_filt_512" },
+
+
+    };
+
+    printf("\n");
+    for (int i = 0; i < sizeof(tests)/sizeof(Test); i++) {
+        printf("%s: ",tests[i].name);
+        initialize_dists(d_d, g.nnodes, source);
+        tests[i].f(g, d_g, d_d, source,false);
+        cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
+        compare(cpu,dists,g.nnodes);
+    }
+    printf("\n");
 
 
     cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
