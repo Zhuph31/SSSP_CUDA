@@ -85,6 +85,12 @@ void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index
     end = getTimeStamp();
     double gpu_time = end - start;
     printf("GPU time: %f\n",gpu_time);
+
+
+    check_cuda(cudaFree(q1));
+    check_cuda(cudaFree(q2));
+    check_cuda(cudaFree(qscratch));
+    check_cuda(cudaFree(qlen));
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -362,12 +368,16 @@ void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_
     double gpu_time = end - start;
     printf("GPU time: %f\n",gpu_time);
 
+    check_cuda(cudaFree(q));
+    check_cuda(cudaFree(touched));
+    check_cuda(cudaFree(scan_indices));
+    check_cuda(cudaFree(qlen));
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////
 
-template <int block_size>
-__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* frontier_in, index_type* frontier_out, index_type n, index_type* block_offsets) {
+template <int block_size, OutType out_type>
+__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* frontier_in, index_type* out, index_type n, index_type* out_size, index_type* scratch) {
     __shared__ index_type vertices[block_size];
     __shared__ index_type first_edge_offset[block_size];
     __shared__ index_type output_offset[block_size];
@@ -412,8 +422,10 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
     // }
     __syncthreads();
 
-    if (tidx == 0 && block_aggregate) {
-        block_offset[0] = atomicAdd(block_offsets,block_aggregate);
+    if (out_type == OutType::FRONTIER) {
+        if (tidx == 0 && block_aggregate) {
+            block_offset[0] = atomicAdd(out_size,block_aggregate);
+        }
     }
     // if (gidx == 0) {
     // printf("\nBlock totals %d\n",*block_offsets);
@@ -449,12 +461,40 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
         edge_data_type old_dw = d[edge_dst];
         edge_data_type new_dw = vw + ew;
 
-        index_type out_val = UINT_MAX;
-        if (new_dw < old_dw) {
-            atomicMin(&d[edge_dst], new_dw);
-            out_val = edge_dst;
+        if (out_type == OutType::FRONTIER) {
+            index_type out_val = UINT_MAX;
+            if (new_dw < old_dw) {
+                atomicMin(&d[edge_dst], new_dw);
+                out_val = edge_dst;
+            }
+            out[block_offset[0] + edge_id] = out_val;
+        } else if (out_type == OutType::QUEUE) {
+            if (new_dw < old_dw) {
+                atomicMin(&d[edge_dst], new_dw);
+                if (atomicCAS(&scratch[edge_dst],0,gidx) == 0) {
+                    index_type q_idx = atomicAdd(out_size,1);
+                    out[q_idx] = edge_dst;
+                }
+            }
+        } else if (out_type == OutType::TOUCHED) {
+            if (new_dw < old_dw) {
+                atomicMin(&d[edge_dst], new_dw);           
+                out[edge_dst] = 1;
+            }
         }
-        frontier_out[block_offset[0] + edge_id] = out_val;
+
+
+
+
+                //         atomicMin(&d[n],new_w);
+                // if (out_type == OutType::QUEUE) {
+                //     if (atomicCAS(&scratch[n],0,index) == 0) {
+                //         index_type q_idx = atomicAdd(pq_idx,1);
+                //         out[q_idx] = n;
+                //     }
+                // } else if (out_type == OutType::TOUCHED) {
+                //     out[n] = 1;
+                // }
         // } else {
         //     frontier_out[block_offset[0] + edge_id] = UINT_MAX;
         // }
@@ -478,7 +518,7 @@ __global__ void filter_frontier(index_type* frontier_in, index_type* frontier_ou
     }
 }
 
-template <int block_size>
+template <int block_size, OutType out_type>
 void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
     double start,end = 0;
     index_type* frontier1, *frontier2 = NULL;
@@ -491,6 +531,16 @@ void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
     *m_N = 1;
     check_cuda(cudaMemcpy(frontier1,&source, sizeof(index_type), cudaMemcpyHostToDevice));
 
+    index_type* scan_indices = NULL;
+    void* flg_tmp_store = NULL;
+    size_t flg_store_size = 0;
+    if (out_type == OutType::TOUCHED) {
+        check_cuda(cudaMalloc(&scan_indices, g.nnodes* sizeof(index_type)));
+        setup_id<<<(g.nnodes + block_size - 1),block_size>>>(scan_indices,g.nnodes);
+        // index_type num_selected = 0;
+        cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,frontier2,frontier1,m_N,g.nnodes);
+        check_cuda(cudaMalloc(&flg_tmp_store,flg_store_size));
+    }
 
     start = getTimeStamp();
 
@@ -502,20 +552,32 @@ void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
             printf("Iter %d\n",n);
         }
 
-        wf_frontier_kernel<block_size><<<(n + block_size-1)/block_size,block_size>>>(d_g, d_dists, frontier1, frontier2, n, m_N);
+        wf_frontier_kernel<block_size, out_type><<<(n + block_size-1)/block_size,block_size>>>(d_g, d_dists, frontier1, frontier2, n, m_N,NULL);
         cudaDeviceSynchronize();
 
 
         // filter
-        n = *m_N;
-        filter_frontier<<<(n + block_size-1)/block_size,block_size>>>(frontier2, frontier1,n,visited,iter+1);
-        cudaDeviceSynchronize();
+        if (out_type == OutType::FRONTIER) {
+            n = *m_N;
+            filter_frontier<<<(n + block_size-1)/block_size,block_size>>>(frontier2, frontier1,n,visited,iter+1);
+            cudaDeviceSynchronize();
+        } else if (out_type == OutType::TOUCHED) {
+            cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,frontier2,frontier1,m_N,g.nnodes);
+            check_cuda(cudaMemset(frontier2,0,g.nnodes*sizeof(index_type)));
+            cudaDeviceSynchronize();
+        }
+
 
         iter++;
     }
     end = getTimeStamp();
     double gpu_time = end - start;
     printf("GPU time: %f\n",gpu_time);
+
+    check_cuda(cudaFree(frontier1));
+    check_cuda(cudaFree(frontier2));
+    check_cuda(cudaFree(visited));
+    check_cuda(cudaFree(m_N));
 }
 
 
@@ -532,28 +594,67 @@ void workfront_sweep(CSRGraph& g, edge_data_type* dists, index_type source) {
     g.copy_to_gpu(d_g);
     edge_data_type* d_d = NULL;
     check_cuda(cudaMalloc(&d_d, g.nnodes * sizeof(edge_data_type)));
+
+    // Initialize for source node
+    initialize_dists(d_d, g.nnodes, source);
+
+    wf_sweep_frontier<256,OutType::TOUCHED>(g, d_g, d_d, source,true);
+
+    cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
+}
+
+
+struct Test {
+    void (*f)(CSRGraph&, CSRGraph&, edge_data_type*, index_type, bool);
+    const char* name;
+};
+
+void workfront_sweep_evaluation(CSRGraph& g, edge_data_type* dists, index_type source, edge_data_type* cpu) {
+    CSRGraph d_g;
+    g.copy_to_gpu(d_g);
+    edge_data_type* d_d = NULL;
+    check_cuda(cudaMalloc(&d_d, g.nnodes * sizeof(edge_data_type)));
     // Initialize for source node
 
+    Test tests[] = {
+        { wf_sweep_atomicq<32>, "atomic_32" },
+        { wf_sweep_atomicq<64>, "atomic_64" },
+        { wf_sweep_atomicq<128>, "atomic_128" },
+        { wf_sweep_atomicq<256>, "atomic_256" },
+        { wf_sweep_atomicq<512>, "atomic_512" },
+        { wf_sweep_filter<32>, "filter_32" },
+        { wf_sweep_filter<64>, "filter_64" },
+        { wf_sweep_filter<128>, "filter_128" },
+        { wf_sweep_filter<256>, "filter_256" },
+        { wf_sweep_filter<512>, "filter_512" },
+        { wf_sweep_coop<32>, "coop_32" },
+        { wf_sweep_coop<64>, "coop_64" },
+        { wf_sweep_coop<128>, "coop_128" },
+        { wf_sweep_coop<256>, "coop_256" },
+        { wf_sweep_coop<512>, "coop_512" },
+        { wf_sweep_frontier<32,OutType::FRONTIER>, "frontier_32" },
+        { wf_sweep_frontier<64,OutType::FRONTIER>, "frontier_64" },
+        { wf_sweep_frontier<128,OutType::FRONTIER>, "frontier_128" },
+        { wf_sweep_frontier<256,OutType::FRONTIER>, "frontier_256" },
+        { wf_sweep_frontier<512,OutType::FRONTIER>, "frontier_512" },
+        { wf_sweep_frontier<32,OutType::TOUCHED>, "frontier_filt_32" },
+        { wf_sweep_frontier<64,OutType::TOUCHED>, "frontier_filt_64" },
+        { wf_sweep_frontier<128,OutType::TOUCHED>, "frontier_filt_128" },
+        { wf_sweep_frontier<256,OutType::TOUCHED>, "frontier_filt_256" },
+        { wf_sweep_frontier<512,OutType::TOUCHED>, "frontier_filt_512" },
+
+
+    };
+
     printf("\n");
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < sizeof(tests)/sizeof(Test); i++) {
+        printf("%s: ",tests[i].name);
         initialize_dists(d_d, g.nnodes, source);
-        wf_sweep_atomicq<512>(g, d_g, d_d, source);
+        tests[i].f(g, d_g, d_d, source,false);
+        cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
+        compare(cpu,dists,g.nnodes);
     }
     printf("\n");
-    for (int i = 0; i < 5; i++) {
-        initialize_dists(d_d, g.nnodes, source);
-        wf_sweep_filter<512>(g, d_g, d_d, source);
-    }
-    printf("\n");
-    for (int i = 0; i < 5; i++) {
-        initialize_dists(d_d, g.nnodes, source);
-        wf_sweep_frontier<256>(g, d_g, d_d, source);
-    }
-    printf("\n");
-    for (int i = 0; i < 5; i++) {
-        initialize_dists(d_d, g.nnodes, source);
-        wf_sweep_coop<256>(g,d_g,d_d,source);
-    }
 
 
     cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
