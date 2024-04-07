@@ -11,18 +11,6 @@
 
 
 
-bool compare(std::vector<edge_data_type>& cpu, edge_data_type* gpu) {
-
-    for (int i = 0; i < cpu.size(); i++) {
-        if (cpu[i] != gpu[i]) {
-            printf("Wrong at %d: %d!=%d\n",i,cpu[i],gpu[i]);
-            return false;
-        }
-    }
-
-    printf("Match!\n");
-    return true;
-}
 
 
 int main(int argc, char** argv) {
@@ -52,7 +40,8 @@ int main(int argc, char** argv) {
 
     start = getTimeStamp();
 
-    workfront_sweep(g, h_d, 0);
+    // workfront_sweep(g, h_d, 0);
+    workfront_sweep_evaluation(g, h_d, 0, out_cpu.data());
     //nearfar(g,h_d);
     
     end = getTimeStamp();
@@ -60,10 +49,10 @@ int main(int argc, char** argv) {
     printf("Total GPU time: %f\n",gpu_time);
 
 
-    compare(out_cpu,h_d);
-    for (int i = 0; i < 40; i++) {
-        printf("%d ",h_d[i]);
-    }
-    printf("\n");
+    compare(out_cpu.data(),h_d, out_cpu.size());
+    // for (int i = 0; i < 40; i++) {
+    //     printf("%d ",h_d[i]);
+    // }
+    // printf("\n");
     return 0;
 }
