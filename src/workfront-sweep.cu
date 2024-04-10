@@ -50,7 +50,7 @@ __global__ void wf_iter_simple(CSRGraph g, edge_data_type* d, index_type* last_q
 }
 
 template <int block_size>
-void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
+double wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
     double start,end = 0;
     index_type* q1, *q2 = NULL;
     index_type* qscratch = NULL;
@@ -89,13 +89,14 @@ void wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index
     }
     end = getTimeStamp();
     double gpu_time = end - start;
-    printf("GPU time: %f\n",gpu_time);
+    if (verbose) printf("GPU time: %f\n",gpu_time);
 
 
     check_cuda(cudaFree(q1));
     check_cuda(cudaFree(q2));
     check_cuda(cudaFree(qscratch));
     check_cuda(cudaFree(qlen));
+    return gpu_time;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -278,7 +279,7 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
 
 
 template <int block_size, CoopType coop_impl>
-void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type source, bool verbose=false) {
+double wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type source, bool verbose=false) {
     double start,end = 0;
     index_type* q1, *q2 = NULL;
     index_type* qscratch = NULL;
@@ -320,7 +321,14 @@ void wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type s
     }
     end = getTimeStamp();
     double gpu_time = end - start;
-    printf("GPU time: %f\n",gpu_time);
+    if (verbose) printf("GPU time: %f\n",gpu_time);
+
+    check_cuda(cudaFree(q1));
+    check_cuda(cudaFree(q2));
+    check_cuda(cudaFree(qscratch));
+    check_cuda(cudaFree(qlen));
+
+    return gpu_time;
 }
 
 
@@ -334,7 +342,7 @@ __global__ void setup_id(index_type* out, index_type n) {
 
 
 template <int block_size, CoopType coop_impl>
-void wf_coop_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
+double wf_coop_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
     double start,end = 0;
     index_type* q = NULL;
     index_type* scan_indices = NULL;
@@ -375,18 +383,19 @@ void wf_coop_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_t
     }
     end = getTimeStamp();
     double gpu_time = end - start;
-    printf("GPU time: %f\n",gpu_time);
+    if (verbose) printf("GPU time: %f\n",gpu_time);
 
     check_cuda(cudaFree(q));
     check_cuda(cudaFree(touched));
     check_cuda(cudaFree(scan_indices));
     check_cuda(cudaFree(qlen));
+    return gpu_time;
 }
 
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 template <int block_size>
-void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
+double wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
     double start,end = 0;
     index_type* q = NULL;
     index_type* scan_indices = NULL;
@@ -426,12 +435,13 @@ void wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_
     }
     end = getTimeStamp();
     double gpu_time = end - start;
-    printf("GPU time: %f\n",gpu_time);
+    if (verbose) printf("GPU time: %f\n",gpu_time);
 
     check_cuda(cudaFree(q));
     check_cuda(cudaFree(touched));
     check_cuda(cudaFree(scan_indices));
     check_cuda(cudaFree(qlen));
+    return gpu_time;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////
@@ -579,7 +589,7 @@ __global__ void filter_frontier(index_type* frontier_in, index_type* frontier_ou
 }
 
 template <int block_size, OutType out_type>
-void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
+double wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
     double start,end = 0;
     index_type* frontier1, *frontier2 = NULL;
     check_cuda(cudaMalloc(&frontier1, g.nedges * sizeof(index_type)));
@@ -632,12 +642,14 @@ void wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
     }
     end = getTimeStamp();
     double gpu_time = end - start;
-    printf("GPU time: %f\n",gpu_time);
+    if (verbose) printf("GPU time: %f\n",gpu_time);
 
     check_cuda(cudaFree(frontier1));
     check_cuda(cudaFree(frontier2));
     check_cuda(cudaFree(visited));
     check_cuda(cudaFree(m_N));
+
+    return gpu_time;
 }
 
 
@@ -665,7 +677,7 @@ void workfront_sweep(CSRGraph& g, edge_data_type* dists, index_type source) {
 
 
 struct Test {
-    void (*f)(CSRGraph&, CSRGraph&, edge_data_type*, index_type, bool);
+    double (*f)(CSRGraph&, CSRGraph&, edge_data_type*, index_type, bool);
     const char* name;
 };
 
@@ -718,9 +730,15 @@ void workfront_sweep_evaluation(CSRGraph& g, edge_data_type* dists, index_type s
 
     printf("\n");
     for (int i = 0; i < sizeof(tests)/sizeof(Test); i++) {
+        double best_time = 1000.0;
         printf("%s: ",tests[i].name);
-        initialize_dists(d_d, g.nnodes, source);
-        tests[i].f(g, d_g, d_d, source,false);
+        for (int j = 0; j < 5; j++) {
+            initialize_dists(d_d, g.nnodes, source);
+            double time = tests[i].f(g, d_g, d_d, source,false);
+            printf(" %f, ", time);
+            if (time < best_time) best_time = time;
+        }
+        printf("Best: %f", best_time);
         cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
         compare(cpu,dists,g.nnodes);
     }
