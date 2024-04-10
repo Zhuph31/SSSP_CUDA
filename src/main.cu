@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
 
     g.read(argv[1]); 
     //g.read("inputs/rmat22.gr");
-    //init_trivial_graph(g);
+    // init_trivial_graph(g);
 
     std::vector<edge_data_type> out_cpu;
 

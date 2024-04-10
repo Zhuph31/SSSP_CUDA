@@ -178,7 +178,7 @@ __device__ index_type bisect_right(index_type *block, index_type lo, index_type 
 
 
 template <int block_size, OutType out_type>
-__global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* out, index_type* pq_idx,  index_type* scratch) {
+__global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* out, index_type* pq_idx,  index_type* scratch, index_type iter) {
     
     //one for start, one for end.
     __shared__ index_type source_vertices[block_size];
@@ -187,6 +187,11 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
 
     __shared__ index_type total_neighbors;
 
+    // Specialize BlockScan for a 1D block of block_size threads on type int
+    typedef cub::BlockScan<index_type, block_size> BlockScan;
+     
+    // Allocate shared memory for BlockScan
+    __shared__ typename BlockScan::TempStorage temp_storage;
 
 
     index_type global_index = threadIdx.x + (blockDim.x * blockIdx.x);
@@ -195,7 +200,7 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
 
     //initialize source vertices, else bisect wont work properly
     source_vertices[local_index] = 0; 
-    num_neighbors[local_index] = 0;
+    // num_neighbors[local_index] = 0;
     //offset_start[local_index] = 0;
     
 
@@ -205,12 +210,26 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
     //do not go beyond last_q_len
     block_index_end = min(block_index_end, last_q_len); 
 
+
+    index_type num_neighbors_local = 0;
     if (global_index < block_index_end){
         //load start and end offset and number of neighbors into shared memory
-        index_type s_idx = last_q[global_index];
-        source_vertices[local_index] = s_idx; 
-        offset_start[local_index] = g.row_start[s_idx];
-        num_neighbors[local_index] = g.row_start[s_idx + 1] - g.row_start[s_idx]; 
+        if (out_type != TOUCHED) {
+            index_type s_idx = last_q[global_index];
+            source_vertices[local_index] = s_idx; 
+            index_type row_start = g.row_start[s_idx];
+            num_neighbors_local = g.row_start[s_idx + 1] - row_start;
+            offset_start[local_index] = row_start;
+        } else {
+            index_type s_idx = global_index;
+            if (last_q[s_idx] == iter -1 ) {
+                // printf("Found vertex %d\n",s_idx);
+                source_vertices[local_index] = s_idx;
+                index_type row_start = g.row_start[s_idx];
+                num_neighbors_local = g.row_start[s_idx + 1] - row_start;
+                offset_start[local_index] = row_start;
+            }
+        }
 
         //printf("block_idx %d, global_index %d, block_end %d, num_neighbors %d, source %d\n", blockIdx.x, global_index, block_index_end, num_neighbors[local_index], s_idx);
         
@@ -219,18 +238,33 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
 
     /****************************** Replace with scan ********************************************************/
     //add total num_neighbors to determine total work, replace with block level exclusive scan also get sum
-    if (local_index == 0){
-        total_neighbors = num_neighbors[0];
-        num_neighbors[0] = 0; 
-        index_type temp = 0; 
-        for (int i = 1; i < block_size; i++){
-            temp = num_neighbors[i];
-            num_neighbors[i] = total_neighbors;
-            total_neighbors += temp;
-        }
+        // __syncthreads();
 
-        //printf("block_id %d, total neighbors per block %d \n", blockIdx.x, total_neighbors);
+    BlockScan(temp_storage).ExclusiveSum(num_neighbors_local, num_neighbors_local, total_neighbors);
+    // output_offset[tidx] = degree;
+    // if (global_index == 0) {
+    // printf("Block aggregate %d\n",total_neighbors);
+    // }
+    num_neighbors[local_index] = num_neighbors_local;
+    // __syncthreads();
+    if (local_index == 0 && out_type == TOUCHED) {
+        atomicAdd(pq_idx,total_neighbors);
     }
+
+
+
+    // if (local_index == 0){
+    //     total_neighbors = num_neighbors[0];
+    //     num_neighbors[0] = 0; 
+    //     index_type temp = 0; 
+    //     for (int i = 1; i < block_size; i++){
+    //         temp = num_neighbors[i];
+    //         num_neighbors[i] = total_neighbors;
+    //         total_neighbors += temp;
+    //     }
+
+    //     //printf("block_id %d, total neighbors per block %d \n", blockIdx.x, total_neighbors);
+    // }
 
     __syncthreads(); 
     
@@ -268,7 +302,7 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* la
                 }
             }
             else if (out_type == OutType::TOUCHED){
-                out[n] = 1;
+                out[n] = iter;
             }
         }
 
@@ -308,7 +342,7 @@ double wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type
         if (coop_impl == CoopType::VANILLA)
             wf_coop_iter_impl1<block_size, OutType::QUEUE><<<(len + block_size - 1) / block_size,block_size>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
         else if (coop_impl == CoopType::FULL)
-            wf_coop_iter_impl2<block_size, OutType::QUEUE><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_d, q1, len,q2, qlen, qscratch);
+            wf_coop_iter_impl2<block_size, OutType::QUEUE><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_d, q1, len,q2, qlen, qscratch,0);
         check_cuda(cudaMemset(qscratch,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
 
@@ -365,7 +399,11 @@ double wf_coop_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index
     check_cuda(cudaMalloc(&flg_tmp_store,flg_store_size));
 
 
+    cudaMemset(&q[1],0xFF,(g.nnodes-1)*sizeof(index_type));
+    cudaMemset(&touched[0],0xFF,(g.nnodes)*sizeof(index_type));
+
     start = getTimeStamp();
+    int iter = 0;
     while (*qlen) {
         if (verbose) {
             printf("Iter %d\n",*qlen);
@@ -374,12 +412,18 @@ double wf_coop_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index
         *qlen = 0;
 
         if (coop_impl == CoopType::VANILLA)
-            wf_coop_iter_impl1<block_size, OutType::TOUCHED><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_dists, q, len, touched,NULL, NULL);
+            wf_coop_iter_impl1<block_size, OutType::TOUCHED><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_dists, q, len, touched,qlen, NULL);
         else if (coop_impl == CoopType::FULL)
-            wf_coop_iter_impl2<block_size, OutType::TOUCHED><<<(len + block_size - 1) / block_size, block_size>>>(d_g, d_dists, q, len, touched,NULL, NULL);
-        cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,touched,q,qlen,g.nnodes);
-        check_cuda(cudaMemset(touched,0,g.nnodes*sizeof(index_type)));
+            wf_coop_iter_impl2<block_size, OutType::TOUCHED><<<(g.nnodes + block_size - 1) / block_size, block_size>>>(d_g, d_dists, q, g.nnodes, touched,qlen, NULL,iter+1);
+        // cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,touched,q,qlen,g.nnodes);
+        // check_cuda(cudaMemset(touched,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
+        index_type* tmp = q;
+        q = touched;
+        touched = tmp;
+        iter++;
+
+        // printf("res: %d\n",*qlen);
     }
     end = getTimeStamp();
     double gpu_time = end - start;
@@ -447,7 +491,7 @@ double wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 template <int block_size, OutType out_type>
-__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* frontier_in, index_type* out, index_type n, index_type* out_size, index_type* scratch) {
+__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* frontier_in, index_type* out, index_type n, index_type* out_size, index_type* scratch, index_type iter) {
     __shared__ index_type vertices[block_size];
     __shared__ index_type first_edge_offset[block_size];
     __shared__ index_type output_offset[block_size];
@@ -464,20 +508,28 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
     
     index_type degree = 0;
     if (gidx < n) {
-        index_type v = frontier_in[gidx];
-        if (v != UINT_MAX) {
+        if (out_type == OutType::FRONTIER) {
+            index_type v = frontier_in[gidx];
+            if (v != UINT_MAX) {
+                index_type row_start =  g.row_start[v];
+                degree = g.row_start[v+1] - row_start;
+                first_edge_offset[tidx] = row_start;
+            }
             vertices[tidx] = v;
-            // if (helper[v]) {
-            //     printf("BAD! Vertex %d already grabbed!\n",v);
-            // }
-            // helper[v] = 1;
-            index_type row_start =  g.row_start[v];
-            first_edge_offset[tidx] = row_start;
-            degree = g.row_start[v+1] - row_start;
         } else {
-            vertices[tidx] = UINT_MAX;
+            index_type v = gidx;
+            if (frontier_in[v] == iter - 1) {
+                index_type row_start =  g.row_start[v];
+                degree = g.row_start[v+1] - row_start;
+                first_edge_offset[tidx] = row_start;
+            } else {
+                v = UINT_MAX;
+            }
+            vertices[tidx] = v;
+
         }
     }
+
     // if (gidx == 0) {
     // printf("Thread %d has node %d with degree %d\n",tidx, vertices[tidx], degree);
     // }
@@ -492,13 +544,14 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
     // }
     __syncthreads();
 
-    if (out_type == OutType::FRONTIER) {
+    // if (out_type == OutType::FRONTIER) {
         if (tidx == 0 && block_aggregate) {
+            // printf("adding %d to %d\n",block_aggregate, *out_size);
             block_offset[0] = atomicAdd(out_size,block_aggregate);
         }
-    }
+    // }
     // if (gidx == 0) {
-    // printf("\nBlock totals %d\n",*block_offsets);
+    // printf("\nBlock totals %d\n",*out_size);
     // }
 
 
@@ -538,6 +591,11 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
                 out_val = edge_dst;
             }
             out[block_offset[0] + edge_id] = out_val;
+        } else if (out_type == OutType::TOUCHED) {
+            if (new_dw < old_dw) {
+                atomicMin(&d[edge_dst], new_dw);           
+                out[edge_dst] = iter;
+            }
         } else if (out_type == OutType::QUEUE) {
             if (new_dw < old_dw) {
                 atomicMin(&d[edge_dst], new_dw);
@@ -545,11 +603,6 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* fr
                     index_type q_idx = atomicAdd(out_size,1);
                     out[q_idx] = edge_dst;
                 }
-            }
-        } else if (out_type == OutType::TOUCHED) {
-            if (new_dw < old_dw) {
-                atomicMin(&d[edge_dst], new_dw);           
-                out[edge_dst] = 1;
             }
         }
 
@@ -610,6 +663,10 @@ double wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, in
         // index_type num_selected = 0;
         cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,frontier2,frontier1,m_N,g.nnodes);
         check_cuda(cudaMalloc(&flg_tmp_store,flg_store_size));
+
+
+        cudaMemset(&frontier1[1], 0xFF, (g.nnodes-1)*sizeof(index_type));
+        cudaMemset(&frontier2[0], 0xFF, (g.nnodes)*sizeof(index_type));
     }
 
     start = getTimeStamp();
@@ -622,7 +679,8 @@ double wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, in
             printf("Iter %d\n",n);
         }
 
-        wf_frontier_kernel<block_size, out_type><<<(n + block_size-1)/block_size,block_size>>>(d_g, d_dists, frontier1, frontier2, n, m_N,NULL);
+        int grid = (((out_type == OutType::TOUCHED)?g.nnodes:n) + block_size-1)/block_size;
+        wf_frontier_kernel<block_size, out_type><<<grid,block_size>>>(d_g, d_dists, frontier1, frontier2, (out_type != OutType::TOUCHED)?n:g.nnodes, m_N, NULL, iter+1);
         cudaDeviceSynchronize();
 
 
@@ -632,9 +690,13 @@ double wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, in
             filter_frontier<<<(n + block_size-1)/block_size,block_size>>>(frontier2, frontier1,n,visited,iter+1);
             cudaDeviceSynchronize();
         } else if (out_type == OutType::TOUCHED) {
-            cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,frontier2,frontier1,m_N,g.nnodes);
-            check_cuda(cudaMemset(frontier2,0,g.nnodes*sizeof(index_type)));
-            cudaDeviceSynchronize();
+            // cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,frontier2,frontier1,m_N,g.nnodes);
+            // check_cuda(cudaMemset(frontier2,0,g.nnodes*sizeof(index_type)));
+            // cudaDeviceSynchronize();
+
+            index_type* tmp = frontier1;
+            frontier1 = frontier2;
+            frontier2 = tmp;
         }
 
 
@@ -670,7 +732,9 @@ void workfront_sweep(CSRGraph& g, edge_data_type* dists, index_type source) {
     // Initialize for source node
     initialize_dists(d_d, g.nnodes, source);
 
-    wf_sweep_frontier<256,OutType::TOUCHED>(g, d_g, d_d, source,true);
+    // wf_sweep_frontier<256,OutType::TOUCHED>(g, d_g, d_d, source,true);
+    wf_coop_filter<32,CoopType::FULL>(g, d_g, d_d, source,true);
+    // wf_sweep_frontier<32,OutType::TOUCHED>, "frontier_filt_32" },
 
     cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
 }
