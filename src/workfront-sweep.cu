@@ -23,34 +23,38 @@ struct TimeCost{
 };
 
 template <OutType out_type>
-__global__ void wf_iter_simple(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* out, index_type* pq_idx, index_type* scratch) {
-    index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
+__global__ void wf_iter_simple(CSRGraph g, edge_data_type* best_costs, index_type* worklist_in, index_type input_len, index_type* output, index_type* output_len, index_type* vertex_claim) {
+    index_type gidx = threadIdx.x + (blockDim.x * blockIdx.x);
 
-    if (index < last_q_len) {
-        index_type s_idx = last_q[index];
-        // somewhat baed on https://towardsdatascience.com/bellman-ford-single-source-shortest-path-algorithm-on-gpu-using-cuda-a358da20144b
-        for (int j = g.row_start[s_idx]; j < g.row_start[s_idx + 1]; j++) {
-            edge_data_type w = d[s_idx];
-            edge_data_type ew = g.edge_data[j];
-            index_type n = g.edge_dst[j];
-            edge_data_type nw = d[n];
-            edge_data_type new_w = ew + w;
-            // Check if the distance is already set to max then just take the max since,
-            if (w >= MAX_VAL){
-                new_w = MAX_VAL;
+    if (gidx < input_len) {
+        // Take a vertex from the work list
+        index_type source_vtx = worklist_in[gidx];
+
+        // Process each of the vertex's node's
+        for (int e = g.row_start[source_vtx]; e < g.row_start[source_vtx + 1]; e++) {
+            edge_data_type source_cost = best_costs[source_vtx];
+            edge_data_type edge_weight = g.edge_data[e];
+            index_type dest_vtx = g.edge_dst[e];
+            edge_data_type old_dest_cost = best_costs[dest_vtx];
+            edge_data_type new_dest_cost = edge_weight + source_cost;
+
+            // Check if the distance is already set to max then just take the max to prevent overflows
+            if (source_cost >= MAX_VAL){
+                new_dest_cost = MAX_VAL;
             }
 
-            //printf("source %u, dst %u, new_w %u\n", s_idx, n, new_w);
+            if (new_dest_cost < old_dest_cost) {
+                // Update improved cost in global memory
+                atomicMin(&best_costs[dest_vtx],new_dest_cost);
 
-            if (new_w < nw) {
-                atomicMin(&d[n],new_w);
+                // Add the destination vertex to next iteration's work list
                 if (out_type == OutType::QUEUE) {
-                    if (atomicCAS(&scratch[n],0,index) == 0) {
-                        index_type q_idx = atomicAdd(pq_idx,1);
-                        out[q_idx] = n;
+                    if (atomicCAS(&vertex_claim[dest_vtx],0,gidx) == 0) {
+                        index_type q_idx = atomicAdd(output_len,1);
+                        output[q_idx] = dest_vtx;
                     }
                 } else if (out_type == OutType::FILTER_COMPACT) {
-                    out[n] = 1;
+                    output[dest_vtx] = 1;
                 }
             }
         }
@@ -115,53 +119,52 @@ TimeCost wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, i
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int block_size, OutType out_type>
-__global__ void wf_coop_iter_impl1(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* out, index_type* pq_idx,  index_type* scratch) {
-    index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
+__global__ void wf_coop_iter_impl1(CSRGraph g, edge_data_type* best_costs, index_type* worklist_in, index_type input_len, index_type* output, index_type* output_len,  index_type* vertex_claim) {
 
     __shared__ index_type block_row_start;
     __shared__ index_type block_row_end; 
-    __shared__ index_type s_idx; 
+    __shared__ index_type source_vtx; 
 
-    //decide what each block work range is 
+    // decide what each block's work range is 
     index_type block_index_start = blockIdx.x * blockDim.x;
     index_type block_index_end = block_index_start + blockDim.x;  
-    //do not go beyond last_q_len
-    block_index_end = min(block_index_end, last_q_len); 
+    // do not go beyond input_len
+    block_index_end = min(block_index_end, input_len);
 
     for (index_type index=block_index_start; index < block_index_end; index++){
         //only first thread in block load row start and end and source index 
         if (threadIdx.x == 0){
-            s_idx = last_q[index];
-            block_row_start = g.row_start[s_idx]; 
-            block_row_end = g.row_start[s_idx + 1]; 
-            //printf("source id %d, block_row_start %d, block_row_end %d \n", s_idx, block_row_start, block_row_end);
+            source_vtx = worklist_in[index];
+            block_row_start = g.row_start[source_vtx]; 
+            block_row_end = g.row_start[source_vtx + 1]; 
         }
         __syncthreads();
 
         //the threads in this block each take one edge
-        for (index_type j =threadIdx.x + block_row_start; j < block_row_end; j += blockDim.x){
-            
-            edge_data_type w = d[s_idx];
-            edge_data_type ew = g.edge_data[j];
-            index_type n = g.edge_dst[j];
-            edge_data_type nw = d[n];
-            edge_data_type new_w = ew + w;
-            // Check if the distance is already set to max then just take the max since,
-            if (w >= MAX_VAL){
-                new_w = MAX_VAL;
+        for (index_type e = threadIdx.x + block_row_start; e < block_row_end; e += blockDim.x){
+            edge_data_type source_cost = best_costs[source_vtx];
+            edge_data_type edge_weight = g.edge_data[e];
+            index_type dest_vtx = g.edge_dst[e];
+            edge_data_type old_dest_cost = best_costs[dest_vtx];
+            edge_data_type new_dest_cost = edge_weight + source_cost;
+
+            // Check if the distance is already set to max then just take the max to prevent overflows
+            if (source_cost >= MAX_VAL){
+                new_dest_cost = MAX_VAL;
             }
 
-            if (new_w < nw) {
+            if (new_dest_cost < old_dest_cost) {
+                // Update improved cost in global memory
+                atomicMin(&best_costs[dest_vtx],new_dest_cost);
 
-                atomicMin(&d[n],new_w);
-                if (out_type == OutType::QUEUE){
-                    if (atomicCAS(&scratch[n],0,1) == 0) {
-                        index_type q_idx = atomicAdd(pq_idx,1);
-                        out[q_idx] = n;
+                // Add the destination vertex to next iteration's work list
+                if (out_type == OutType::QUEUE) {
+                    if (atomicCAS(&vertex_claim[dest_vtx],0,1) == 0) {
+                        index_type q_idx = atomicAdd(output_len,1);
+                        output[q_idx] = dest_vtx;
                     }
-                }
-                else if (out_type == OutType::FILTER_COMPACT){
-                    out[n] = 1;
+                } else if (out_type == OutType::FILTER_COMPACT) {
+                    output[dest_vtx] = 1;
                 }
             }
         }
@@ -191,7 +194,7 @@ __device__ index_type bisect_right(index_type *block, index_type lo, index_type 
 
 
 template <int block_size, OutType out_type>
-__global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* input, index_type input_len, index_type* out, index_type* outpu_len,  index_type* scratch, index_type iter) {
+__global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* best_costs, index_type* worklist_in, index_type input_len, index_type* output, index_type* outpu_len,  index_type* vertex_claim, index_type iter) {
     
     //one for start, one for end.
     __shared__ index_type source_vertices[block_size];
@@ -232,7 +235,7 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* in
         if (out_type == FILTER_IGNORE) {
             // Filter ignore: input is last iteration each vertex was updated
             index_type s_idx = global_index;
-            if (input[s_idx] == iter -1 ) {
+            if (worklist_in[s_idx] == iter -1 ) {
                 // printf("Found vertex %d\n",s_idx);
                 source_vertices[local_index] = s_idx;
                 index_type row_start = g.row_start[s_idx];
@@ -241,7 +244,7 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* in
             }
         } else if (out_type == FRONTIER) {
              // Frontier: input is a source vertex ID or UINT_MAX
-            index_type v = input[global_index];
+            index_type v = worklist_in[global_index];
             if (v != UINT_MAX ) {
                 // printf("Found vertex %d\n",s_idx);
                 source_vertices[local_index] = v;
@@ -251,7 +254,7 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* in
             }
         } else {
             // Input is list of vertex id's to check
-            index_type s_idx = input[global_index];
+            index_type s_idx = worklist_in[global_index];
             source_vertices[local_index] = s_idx; 
             index_type row_start = g.row_start[s_idx];
             num_neighbors_local = g.row_start[s_idx + 1] - row_start;
@@ -272,6 +275,9 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* in
     // if (global_index == 0) {
     // printf("Block aggregate %d\n",total_neighbors);
     // }
+    if (total_neighbors == 0) {
+        return;
+    }
     num_neighbors[local_index] = num_neighbors_local;
     // __syncthreads();
     
@@ -308,10 +314,10 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* in
 
         
         //rest of code remains the same 
-        edge_data_type w = d[source];
+        edge_data_type w = best_costs[source];
         edge_data_type ew = g.edge_data[edge_index];
         index_type n = g.edge_dst[edge_index];
-        edge_data_type nw = d[n];
+        edge_data_type nw = best_costs[n];
         edge_data_type new_w = ew + w;
 
         // Check if the distance is already set to max then just take the max since,
@@ -323,28 +329,28 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* in
 
         if (out_type != OutType::FRONTIER) {
             if (new_w < nw) {
-                atomicMin(&d[n],new_w);
+                atomicMin(&best_costs[n],new_w);
                 if (out_type == OutType::QUEUE){
-                    if (atomicCAS(&scratch[n],0,1) == 0) {
+                    if (atomicCAS(&vertex_claim[n],0,1) == 0) {
                         index_type q_idx = atomicAdd(outpu_len,1);
-                        out[q_idx] = n;
+                        output[q_idx] = n;
                     }
                 }
                 else if (out_type == OutType::FILTER_IGNORE){
-                    out[n] = iter;
+                    output[n] = iter;
                 } else if (out_type == OutType::FILTER_COMPACT) {
                     // printf("Flagging %d\n",n);
-                    out[n] = 1;
+                    output[n] = 1;
                 }
             }
         } else {
             index_type out_val = UINT_MAX;
             if (new_w < nw) {
-                atomicMin(&d[n], new_w);
+                atomicMin(&best_costs[n], new_w);
                 out_val = n;
             }
             // printf("writing %d to output %d(source %d)\n",out_val, frontier_output_start[0] + work_index, source);
-            out[frontier_output_start[0] + work_index] = out_val;
+            output[frontier_output_start[0] + work_index] = out_val;
         }
 
          
@@ -415,10 +421,10 @@ __global__ void setup_id(index_type* out, index_type n) {
     if (index < n)  out[index] = index;
 }
 
-__global__ void filter_frontier(index_type* frontier_in, index_type* frontier_out, index_type n, index_type* visited, index_type iteration) {
+__global__ void filter_frontier(index_type* frontier_in, index_type* frontier_out, index_type frontier_len, index_type* visited, index_type iteration) {
     index_type gidx = threadIdx.x + (blockDim.x * blockIdx.x);
 
-    if (gidx < n) {
+    if (gidx < frontier_len) {
         index_type v = frontier_in[gidx];
         index_type out = UINT_MAX;
         if (v != UINT_MAX) {
@@ -584,11 +590,12 @@ TimeCost wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, in
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 template <int block_size, OutType out_type>
-__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* input, index_type* out, index_type n, index_type* out_size, index_type* vertex_claim, index_type iter) {
+__global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* best_costs, index_type* worklist_in, index_type* output, index_type input_len, index_type* output_len, index_type* vertex_claim, index_type iter) {
     __shared__ index_type vertices[block_size];
     __shared__ index_type first_edge_offset[block_size];
     __shared__ index_type output_offset[block_size];
     __shared__ uint64_t block_offset[1];
+    
 
     // Specialize BlockScan for a 1D block of 128 threads on type int
     typedef cub::BlockScan<index_type, block_size> BlockScan;
@@ -600,9 +607,9 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* in
     index_type tidx = threadIdx.x;
     
     index_type degree = 0;
-    if (gidx < n) {
+    if (gidx < input_len) {
         if (out_type == OutType::FRONTIER) {
-            index_type v = input[gidx];
+            index_type v = worklist_in[gidx];
             if (v != UINT_MAX) {
                 index_type row_start =  g.row_start[v];
                 degree = g.row_start[v+1] - row_start;
@@ -611,7 +618,7 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* in
             vertices[tidx] = v;
         } else if (out_type == OutType::FILTER_IGNORE){
             index_type v = gidx;
-            if (input[v] == iter - 1) {
+            if (worklist_in[v] == iter - 1) {
                 index_type row_start =  g.row_start[v];
                 degree = g.row_start[v+1] - row_start;
                 first_edge_offset[tidx] = row_start;
@@ -619,13 +626,11 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* in
                 v = UINT_MAX;
             }
             vertices[tidx] = v;
-        } else {//} (out_type == OutType::FILTER_COMPACT) {
-            index_type v = input[gidx];
-            // if (v != UINT_MAX) {
-                index_type row_start =  g.row_start[v];
-                degree = g.row_start[v+1] - row_start;
-                first_edge_offset[tidx] = row_start;
-            // }
+        } else {
+            index_type v = worklist_in[gidx];
+            index_type row_start =  g.row_start[v];
+            degree = g.row_start[v+1] - row_start;
+            first_edge_offset[tidx] = row_start;
             vertices[tidx] = v;
         }
     }
@@ -633,8 +638,7 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* in
     // if (gidx == 0) {
     // printf("Thread %d has node %d with degree %d\n",tidx, vertices[tidx], degree);
     // }
-
-    __syncthreads();
+    
 
     index_type block_aggregate = 0;
     BlockScan(temp_storage).ExclusiveSum(degree, degree, block_aggregate);
@@ -642,12 +646,15 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* in
     // if (gidx == 0) {
     // printf("Block aggregate %d\n",block_aggregate);
     // }
-    __syncthreads();
+    // __syncthreads();
+    if (block_aggregate == 0) {
+        return;
+    }
 
     if (out_type == OutType::FRONTIER || out_type == OutType::FILTER_IGNORE) {
         if (tidx == 0 && block_aggregate) {
             // printf("adding %d to %d\n",block_aggregate, *out_size);
-            block_offset[0] = atomicAdd(out_size,block_aggregate);
+            block_offset[0] = atomicAdd(output_len,block_aggregate);
         }
     }
     // if (gidx == 0) {
@@ -675,38 +682,37 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* in
         }
 
         index_type edge_offset = edge_id - output_offset[v_id];
-        index_type v_in = vertices[v_id];
-        // if (v_in == 0) printf("Got vertex 0! Edge_id %d\n", edge_id);
-        index_type edge_dst = g.edge_dst[first_edge_offset[v_id]+ edge_offset];
-        edge_data_type ew = g.edge_data[first_edge_offset[v_id]+ edge_offset];
+        index_type source_vtx = vertices[v_id];
+        index_type dest_vtx = g.edge_dst[first_edge_offset[v_id]+ edge_offset];
+        edge_data_type edge_weight = g.edge_data[first_edge_offset[v_id]+ edge_offset];
         // printf("exploring edge %d\n",first_edge_offset[v_id]+ edge_offset);
-        edge_data_type vw = d[v_in];
-        edge_data_type old_dw = d[edge_dst];
-        edge_data_type new_dw = vw + ew;
+        edge_data_type source_cost = best_costs[source_vtx];
+        edge_data_type old_dest_cost = best_costs[dest_vtx];
+        edge_data_type new_dest_cost = source_cost + edge_weight;
 
         if (out_type == OutType::FRONTIER) {
             index_type out_val = UINT_MAX;
-            if (new_dw < old_dw) {
-                atomicMin(&d[edge_dst], new_dw);
-                out_val = edge_dst;
+            if (new_dest_cost < old_dest_cost) {
+                atomicMin(&best_costs[dest_vtx], new_dest_cost);
+                out_val = dest_vtx;
             }
-            out[block_offset[0] + edge_id] = out_val;
+            output[block_offset[0] + edge_id] = out_val;
         } else if (out_type == OutType::FILTER_IGNORE) {
-            if (new_dw < old_dw) {
-                atomicMin(&d[edge_dst], new_dw);           
-                out[edge_dst] = iter;
+            if (new_dest_cost < old_dest_cost) {
+                atomicMin(&best_costs[dest_vtx], new_dest_cost);           
+                output[dest_vtx] = iter;
             }
         } else if (out_type == OutType::FILTER_COMPACT) {
-            if (new_dw < old_dw) {
-                atomicMin(&d[edge_dst], new_dw);           
-                out[edge_dst] = 1;
+            if (new_dest_cost < old_dest_cost) {
+                atomicMin(&best_costs[dest_vtx], new_dest_cost);           
+                output[dest_vtx] = 1;
             }
         } else if (out_type == OutType::QUEUE) {
-            if (new_dw < old_dw) {
-                atomicMin(&d[edge_dst], new_dw);
-                if (atomicCAS(&vertex_claim[edge_dst],0,gidx) == 0) {
-                    index_type q_idx = atomicAdd(out_size,1);
-                    out[q_idx] = edge_dst;
+            if (new_dest_cost < old_dest_cost) {
+                atomicMin(&best_costs[dest_vtx], new_dest_cost);
+                if (atomicCAS(&vertex_claim[dest_vtx],0,1) == 0) {
+                    index_type q_idx = atomicAdd(output_len,1);
+                    output[q_idx] = dest_vtx;
                 }
             }
         }
@@ -821,8 +827,8 @@ void workfront_sweep(CSRGraph& g, edge_data_type* dists, index_type source) {
     // Initialize for source node
     initialize_dists(d_d, g.nnodes, source);
 
-    // wf_sweep_frontier<256,OutType::FRONTIER>(g, d_g, d_d, source,true);
-    wf_coop_filter<32,CoopType::FULL,OutType::FRONTIER>(g, d_g, d_d, source,true);
+    wf_sweep_frontier<256,OutType::FILTER_COMPACT>(g, d_g, d_d, source,true);
+    // wf_coop_filter<32,CoopType::FULL,OutType::FRONTIER>(g, d_g, d_d, source,true);
     // wf_sweep_frontier<32,OutType::TOUCHED>, "frontier_filt_32" },
 
     cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
@@ -903,7 +909,7 @@ void workfront_sweep_evaluation(CSRGraph& g, edge_data_type* dists, index_type s
     for (int i = 0; i < sizeof(tests)/sizeof(Test); i++) {
         double best_gpu_time = 1000.0, best_overhead = 1000.0;
         printf("%s: ",tests[i].name);
-        for (int j = 0; j < 5; j++) {
+        for (int j = 0; j < 2; j++) {
             initialize_dists(d_d, g.nnodes, source);
             auto tc = tests[i].f(g, d_g, d_d, source,false);
             printf("{%f, %f}, ", tc.gpu_time, tc.overhead);
