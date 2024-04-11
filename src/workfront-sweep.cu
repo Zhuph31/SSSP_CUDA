@@ -15,6 +15,13 @@ enum CoopType{
     FULL
 };
 
+struct TimeCost{
+  double gpu_time;
+  double overhead;
+  TimeCost () = default;
+  TimeCost(double g, double o) : gpu_time(g), overhead(o) {}
+};
+
 template <OutType out_type>
 __global__ void wf_iter_simple(CSRGraph g, edge_data_type* d, index_type* last_q, index_type last_q_len, index_type* out, index_type* pq_idx, index_type* scratch) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
@@ -51,10 +58,13 @@ __global__ void wf_iter_simple(CSRGraph g, edge_data_type* d, index_type* last_q
 }
 
 template <int block_size>
-double wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
-    double start,end = 0;
+TimeCost wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
+    double start, end = 0, overhead = 0;
     index_type* q1, *q2 = NULL;
     index_type* qscratch = NULL;
+
+
+    double setup_start = getTimeStamp();
     check_cuda(cudaMalloc(&q1, g.nnodes * sizeof(index_type)));
     check_cuda(cudaMalloc(&q2, g.nnodes * sizeof(index_type)));
     check_cuda(cudaMalloc(&qscratch, g.nnodes* sizeof(index_type)));
@@ -63,11 +73,13 @@ double wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, ind
     index_type* qlen = NULL;
     check_cuda(cudaMallocManaged(&qlen, sizeof(index_type)));
     *qlen = 1;
+    
 
     //index_type* hq = NULL;
     //cudaHostAlloc(&hq,g.nnodes*sizeof(index_type),cudaHostAllocDefault);
 
     start = getTimeStamp();
+    overhead += start - setup_start;
 
     int itr = 0;
     while (*qlen) {
@@ -92,12 +104,12 @@ double wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, ind
     double gpu_time = end - start;
     if (verbose) printf("GPU time: %f\n",gpu_time);
 
-
     check_cuda(cudaFree(q1));
     check_cuda(cudaFree(q2));
     check_cuda(cudaFree(qscratch));
     check_cuda(cudaFree(qlen));
-    return gpu_time;
+    overhead += getTimeStamp() - end;
+    return {gpu_time, overhead};
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -342,10 +354,11 @@ __global__ void wf_coop_iter_impl2(CSRGraph g, edge_data_type* d, index_type* in
 
 
 template <int block_size, CoopType coop_impl>
-double wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type source, bool verbose=false) {
-    double start,end = 0;
+TimeCost wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type source, bool verbose=false) {
+    double start, end = 0, overhead = 0;
     index_type* q1, *q2 = NULL;
     index_type* qscratch = NULL;
+    double setup_start = getTimeStamp();
     check_cuda(cudaMalloc(&q1, g.nnodes * sizeof(index_type)));
     check_cuda(cudaMalloc(&q2, g.nnodes * sizeof(index_type)));
     check_cuda(cudaMalloc(&qscratch, g.nnodes* sizeof(index_type)));
@@ -359,6 +372,7 @@ double wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type
     //cudaHostAlloc(&hq,g.nnodes*sizeof(index_type),cudaHostAllocDefault);
 
     start = getTimeStamp();
+    overhead += start - setup_start;
 
     int itr = 0;
     while (*qlen) {
@@ -391,11 +405,10 @@ double wf_sweep_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, index_type
     check_cuda(cudaFree(qscratch));
     check_cuda(cudaFree(qlen));
 
-    return gpu_time;
+    overhead += getTimeStamp() - end;
+
+    return {gpu_time, overhead};
 }
-
-
-
 
 __global__ void setup_id(index_type* out, index_type n) {
     index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
@@ -419,11 +432,12 @@ __global__ void filter_frontier(index_type* frontier_in, index_type* frontier_ou
 
 
 template <int block_size, CoopType coop_impl, OutType out_type>
-double wf_coop_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
-    double start,end = 0;
+TimeCost wf_coop_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
+    double start, end = 0, overhead = 0;
     index_type* q = NULL;
     index_type* scan_indices = NULL;
     index_type* touched = NULL;
+    double setup_start = getTimeStamp();
     if (out_type != OutType::FRONTIER) {
         check_cuda(cudaMalloc(&q, g.nnodes * sizeof(index_type)));
         check_cuda(cudaMalloc(&touched, g.nnodes* sizeof(index_type)));
@@ -460,6 +474,7 @@ double wf_coop_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index
     }
 
     start = getTimeStamp();
+    overhead += start - setup_start;
     int iter = 0;
     while (*qlen) {
         if (verbose) {
@@ -504,7 +519,8 @@ double wf_coop_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index
     check_cuda(cudaFree(touched));
     check_cuda(cudaFree(scan_indices));
     check_cuda(cudaFree(qlen));
-    return gpu_time;
+    overhead += getTimeStamp() - end;
+    return {gpu_time, overhead};
 }
 
 
@@ -513,11 +529,12 @@ double wf_coop_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index
 
 
 template <int block_size>
-double wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
-    double start,end = 0;
+TimeCost wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
+    double start, end = 0, overhead = 0;
     index_type* q = NULL;
     index_type* scan_indices = NULL;
     index_type* touched = NULL;
+    double setup_start = getTimeStamp();
     check_cuda(cudaMalloc(&q, g.nnodes * sizeof(index_type)));
     check_cuda(cudaMalloc(&touched, g.nnodes* sizeof(index_type)));
     check_cuda(cudaMalloc(&scan_indices, g.nnodes* sizeof(index_type)));
@@ -537,6 +554,7 @@ double wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
 
 
     start = getTimeStamp();
+    overhead += start - setup_start;
     while (*qlen) {
         if (verbose) {
             printf("Iter %d\n",*qlen);
@@ -559,7 +577,8 @@ double wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, inde
     check_cuda(cudaFree(touched));
     check_cuda(cudaFree(scan_indices));
     check_cuda(cudaFree(qlen));
-    return gpu_time;
+    overhead += getTimeStamp() - end;
+    return {gpu_time, overhead};
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////
@@ -698,9 +717,10 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* d, index_type* in
 
 
 template <int block_size, OutType out_type>
-double wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
-    double start,end = 0;
+TimeCost wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
+    double start, end = 0, overhead = 0;
     index_type* list1, *list2, *vertex_claim = NULL;
+    double setup_start = getTimeStamp();
     check_cuda(cudaMalloc(&list1, g.nedges * sizeof(index_type)));
     check_cuda(cudaMalloc(&list2, g.nedges * sizeof(index_type)));
     index_type* m_N = NULL;
@@ -729,6 +749,7 @@ double wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, in
     }
 
     start = getTimeStamp();
+    overhead += start - setup_start;
 
     index_type iter = 0;
     while(*m_N) {
@@ -777,7 +798,9 @@ double wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, in
         check_cuda(cudaFree(vertex_claim));
     }
 
-    return gpu_time;
+    overhead += getTimeStamp() - end;
+
+    return {gpu_time, overhead};
 }
 
 
@@ -807,7 +830,7 @@ void workfront_sweep(CSRGraph& g, edge_data_type* dists, index_type source) {
 
 
 struct Test {
-    double (*f)(CSRGraph&, CSRGraph&, edge_data_type*, index_type, bool);
+    TimeCost (*f)(CSRGraph&, CSRGraph&, edge_data_type*, index_type, bool);
     const char* name;
 };
 
@@ -874,21 +897,20 @@ void workfront_sweep_evaluation(CSRGraph& g, edge_data_type* dists, index_type s
         { wf_sweep_frontier<128,OutType::FILTER_IGNORE>, "frontier_filt_ig_128" },
         { wf_sweep_frontier<256,OutType::FILTER_IGNORE>, "frontier_filt_ig_256" },
         { wf_sweep_frontier<512,OutType::FILTER_IGNORE>, "frontier_filt_ig_512" },
-
-
     };
 
     printf("\n");
     for (int i = 0; i < sizeof(tests)/sizeof(Test); i++) {
-        double best_time = 1000.0;
+        double best_gpu_time = 1000.0, best_overhead = 1000.0;
         printf("%s: ",tests[i].name);
         for (int j = 0; j < 5; j++) {
             initialize_dists(d_d, g.nnodes, source);
-            double time = tests[i].f(g, d_g, d_d, source,false);
-            printf(" %f, ", time);
-            if (time < best_time) best_time = time;
+            auto tc = tests[i].f(g, d_g, d_d, source,false);
+            printf("{%f, %f}, ", tc.gpu_time, tc.overhead);
+            if (tc.gpu_time < best_gpu_time) best_gpu_time = tc.gpu_time;
+            if (tc.overhead < best_overhead) best_overhead = tc.overhead;
         }
-        printf("Best: %f", best_time);
+        printf(", Best: {%f, %f}, ", best_gpu_time, best_overhead);
         cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
         compare(cpu,dists,g.nnodes);
     }

@@ -19,3 +19,4 @@ build
 compile_commands.json
 sssp
 build.sh
+.cache
