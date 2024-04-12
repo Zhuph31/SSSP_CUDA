@@ -29,19 +29,14 @@ __global__ void wf_iter_simple(CSRGraph g, edge_data_type* best_costs, index_typ
     if (gidx < input_len) {
         // Take a vertex from the work list
         index_type source_vtx = worklist_in[gidx];
+        edge_data_type source_cost = best_costs[source_vtx];
 
         // Process each of the vertex's node's
         for (int e = g.row_start[source_vtx]; e < g.row_start[source_vtx + 1]; e++) {
-            edge_data_type source_cost = best_costs[source_vtx];
             edge_data_type edge_weight = g.edge_data[e];
             index_type dest_vtx = g.edge_dst[e];
             edge_data_type old_dest_cost = best_costs[dest_vtx];
             edge_data_type new_dest_cost = edge_weight + source_cost;
-
-            // Check if the distance is already set to max then just take the max to prevent overflows
-            if (source_cost >= MAX_VAL){
-                new_dest_cost = MAX_VAL;
-            }
 
             if (new_dest_cost < old_dest_cost) {
                 // Update improved cost in global memory
@@ -123,7 +118,8 @@ __global__ void wf_coop_iter_impl1(CSRGraph g, edge_data_type* best_costs, index
 
     __shared__ index_type block_row_start;
     __shared__ index_type block_row_end; 
-    __shared__ index_type source_vtx; 
+    // __shared__ index_type source_vtx;
+    __shared__ index_type source_cost_shared;
 
     // decide what each block's work range is 
     index_type block_index_start = blockIdx.x * blockDim.x;
@@ -134,24 +130,20 @@ __global__ void wf_coop_iter_impl1(CSRGraph g, edge_data_type* best_costs, index
     for (index_type index=block_index_start; index < block_index_end; index++){
         //only first thread in block load row start and end and source index 
         if (threadIdx.x == 0){
-            source_vtx = worklist_in[index];
+            index_type source_vtx = worklist_in[index];
             block_row_start = g.row_start[source_vtx]; 
             block_row_end = g.row_start[source_vtx + 1]; 
+            source_cost_shared = best_costs[source_vtx];
         }
         __syncthreads();
 
+        edge_data_type source_cost = source_cost_shared;
         //the threads in this block each take one edge
         for (index_type e = threadIdx.x + block_row_start; e < block_row_end; e += blockDim.x){
-            edge_data_type source_cost = best_costs[source_vtx];
             edge_data_type edge_weight = g.edge_data[e];
             index_type dest_vtx = g.edge_dst[e];
             edge_data_type old_dest_cost = best_costs[dest_vtx];
             edge_data_type new_dest_cost = edge_weight + source_cost;
-
-            // Check if the distance is already set to max then just take the max to prevent overflows
-            if (source_cost >= MAX_VAL){
-                new_dest_cost = MAX_VAL;
-            }
 
             if (new_dest_cost < old_dest_cost) {
                 // Update improved cost in global memory
@@ -591,7 +583,7 @@ TimeCost wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, in
 
 template <int block_size, OutType out_type>
 __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* best_costs, index_type* worklist_in, index_type* output, index_type input_len, index_type* output_len, index_type* vertex_claim, index_type iter) {
-    __shared__ index_type vertices[block_size];
+    __shared__ index_type vertex_costs[block_size];
     __shared__ index_type first_edge_offset[block_size];
     __shared__ index_type output_offset[block_size];
     __shared__ uint64_t block_offset[1];
@@ -614,24 +606,24 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* best_costs, index
                 index_type row_start =  g.row_start[v];
                 degree = g.row_start[v+1] - row_start;
                 first_edge_offset[tidx] = row_start;
+                vertex_costs[tidx] = best_costs[v];
             }
-            vertices[tidx] = v;
         } else if (out_type == OutType::FILTER_IGNORE){
             index_type v = gidx;
             if (worklist_in[v] == iter - 1) {
                 index_type row_start =  g.row_start[v];
                 degree = g.row_start[v+1] - row_start;
                 first_edge_offset[tidx] = row_start;
+                vertex_costs[tidx] = best_costs[v];
             } else {
                 v = UINT_MAX;
             }
-            vertices[tidx] = v;
         } else {
             index_type v = worklist_in[gidx];
             index_type row_start =  g.row_start[v];
             degree = g.row_start[v+1] - row_start;
             first_edge_offset[tidx] = row_start;
-            vertices[tidx] = v;
+            vertex_costs[tidx] = best_costs[v];
         }
     }
 
@@ -664,11 +656,12 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* best_costs, index
 
     __syncthreads();
 
+    index_type last_vid = 0;
     for (index_type edge_id = tidx; edge_id < block_aggregate; edge_id += block_size) {
         // search for edge
-        index_type v_id = 0;
+        index_type v_id = last_vid;
         {
-            index_type lo = 0;
+            index_type lo = last_vid;
             index_type hi = block_size;
             while (lo != hi-1) {
                 v_id = lo + (hi - lo)/2;
@@ -679,14 +672,15 @@ __global__ void wf_frontier_kernel(CSRGraph g, edge_data_type* best_costs, index
                 }
             }
             v_id = lo;
+            last_vid = v_id;
         }
 
         index_type edge_offset = edge_id - output_offset[v_id];
-        index_type source_vtx = vertices[v_id];
+        // index_type source_vtx = vertices[v_id];
         index_type dest_vtx = g.edge_dst[first_edge_offset[v_id]+ edge_offset];
         edge_data_type edge_weight = g.edge_data[first_edge_offset[v_id]+ edge_offset];
         // printf("exploring edge %d\n",first_edge_offset[v_id]+ edge_offset);
-        edge_data_type source_cost = best_costs[source_vtx];
+        edge_data_type source_cost = vertex_costs[v_id];
         edge_data_type old_dest_cost = best_costs[dest_vtx];
         edge_data_type new_dest_cost = source_cost + edge_weight;
 
