@@ -422,7 +422,7 @@ __global__ void filter_frontier(index_type* frontier_in, index_type* frontier_ou
 
 
 template <int block_size, OutType out_type>
-TimeCost wf_sweep_frontier(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
+TimeCost wf_sweep_full_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
     double start, end = 0, overhead = 0;
     index_type* worklist1, *worklist2, *vertex_claim = NULL;
     index_type* managed_length = NULL;
@@ -539,7 +539,7 @@ void workfront_sweep(CSRGraph& g, edge_data_type* dists, index_type source) {
     // Initialize for source node
     initialize_dists(d_d, g.nnodes, source);
 
-    wf_sweep_frontier<256,OutType::FILTER_COMPACT>(g, d_g, d_d, source,true);
+    wf_sweep_full_coop<256,OutType::FILTER_COMPACT>(g, d_g, d_d, source,true);
 
     tf_start = getTimeStamp();
     cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type), cudaMemcpyDeviceToHost);
@@ -577,26 +577,26 @@ void workfront_sweep_evaluation(CSRGraph& g, edge_data_type* dists, index_type s
         { wf_sweep_simple_coop<128>, "simple_coop_128" },
         { wf_sweep_simple_coop<256>, "simple_coop_256" },
         { wf_sweep_simple_coop<512>, "simple_coop_512" },
-        { wf_sweep_frontier<32,OutType::QUEUE>, "full_coop_q_32" },
-        { wf_sweep_frontier<64,OutType::QUEUE>, "full_coop_q_64" },
-        { wf_sweep_frontier<128,OutType::QUEUE>, "full_coop_q_128" },
-        { wf_sweep_frontier<256,OutType::QUEUE>, "full_coop_q_256" },
-        { wf_sweep_frontier<512,OutType::QUEUE>, "full_coop_q_512" },
-        { wf_sweep_frontier<32,OutType::FRONTIER>, "full_coop_frontier_32" },
-        { wf_sweep_frontier<64,OutType::FRONTIER>, "full_coop_frontier_64" },
-        { wf_sweep_frontier<128,OutType::FRONTIER>, "full_coop_frontier_128" },
-        { wf_sweep_frontier<256,OutType::FRONTIER>, "full_coop_frontier_256" },
-        { wf_sweep_frontier<512,OutType::FRONTIER>, "full_coop_frontier_512" },
-        { wf_sweep_frontier<32,OutType::FILTER_COMPACT>, "full_coop_filt_cp_32" },
-        { wf_sweep_frontier<64,OutType::FILTER_COMPACT>, "full_coop_filt_cp_64" },
-        { wf_sweep_frontier<128,OutType::FILTER_COMPACT>, "full_coop_filt_cp_128" },
-        { wf_sweep_frontier<256,OutType::FILTER_COMPACT>, "full_coop_filt_cp_256" },
-        { wf_sweep_frontier<512,OutType::FILTER_COMPACT>, "full_coop_filt_cp_512" },
-        { wf_sweep_frontier<32,OutType::FILTER_IGNORE>, "full_coop_filt_ig_32" },
-        { wf_sweep_frontier<64,OutType::FILTER_IGNORE>, "full_coop_filt_ig_64" },
-        { wf_sweep_frontier<128,OutType::FILTER_IGNORE>, "full_coop_filt_ig_128" },
-        { wf_sweep_frontier<256,OutType::FILTER_IGNORE>, "full_coop_filt_ig_256" },
-        { wf_sweep_frontier<512,OutType::FILTER_IGNORE>, "full_coop_filt_ig_512" },
+        { wf_sweep_full_coop<32,OutType::QUEUE>, "full_coop_q_32" },
+        { wf_sweep_full_coop<64,OutType::QUEUE>, "full_coop_q_64" },
+        { wf_sweep_full_coop<128,OutType::QUEUE>, "full_coop_q_128" },
+        { wf_sweep_full_coop<256,OutType::QUEUE>, "full_coop_q_256" },
+        { wf_sweep_full_coop<512,OutType::QUEUE>, "full_coop_q_512" },
+        { wf_sweep_full_coop<32,OutType::FRONTIER>, "full_coop_frontier_32" },
+        { wf_sweep_full_coop<64,OutType::FRONTIER>, "full_coop_frontier_64" },
+        { wf_sweep_full_coop<128,OutType::FRONTIER>, "full_coop_frontier_128" },
+        { wf_sweep_full_coop<256,OutType::FRONTIER>, "full_coop_frontier_256" },
+        { wf_sweep_full_coop<512,OutType::FRONTIER>, "full_coop_frontier_512" },
+        { wf_sweep_full_coop<32,OutType::FILTER_COMPACT>, "full_coop_filt_cp_32" },
+        { wf_sweep_full_coop<64,OutType::FILTER_COMPACT>, "full_coop_filt_cp_64" },
+        { wf_sweep_full_coop<128,OutType::FILTER_COMPACT>, "full_coop_filt_cp_128" },
+        { wf_sweep_full_coop<256,OutType::FILTER_COMPACT>, "full_coop_filt_cp_256" },
+        { wf_sweep_full_coop<512,OutType::FILTER_COMPACT>, "full_coop_filt_cp_512" },
+        { wf_sweep_full_coop<32,OutType::FILTER_IGNORE>, "full_coop_filt_ig_32" },
+        { wf_sweep_full_coop<64,OutType::FILTER_IGNORE>, "full_coop_filt_ig_64" },
+        { wf_sweep_full_coop<128,OutType::FILTER_IGNORE>, "full_coop_filt_ig_128" },
+        { wf_sweep_full_coop<256,OutType::FILTER_IGNORE>, "full_coop_filt_ig_256" },
+        { wf_sweep_full_coop<512,OutType::FILTER_IGNORE>, "full_coop_filt_ig_512" },
     };
 
     printf("\n");
