@@ -44,7 +44,6 @@ __global__ void wf_iter_simple(CSRGraph g, edge_data_type* best_costs, index_typ
                 // Add the destination vertex to next iteration's work list
                 if (out_type == OutType::QUEUE) {
                     if (atomicCAS(&vertex_claim[dest_vtx],0,gidx) == 0) {
-                        vertex_claim[dest_vtx] = 1;
                         index_type q_idx = atomicAdd(output_len,1);
                         output[q_idx] = dest_vtx;
                     }
@@ -69,7 +68,7 @@ TimeCost wf_sweep_atomicq(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, i
     check_cuda(cudaMalloc(&vertex_claim, g.nnodes* sizeof(index_type)));
     check_cuda(cudaMallocManaged(&worklist_len, sizeof(index_type)));
 
-    // Set first q entry to 0 (source)
+    // Set first worklist entry to 0 (source)
     check_cuda(cudaMemcpy(worklist1, &source, sizeof(index_type), cudaMemcpyHostToDevice));
     *worklist_len = 1;
 
@@ -120,40 +119,40 @@ __global__ void setup_id(index_type* out, index_type n) {
 template <int block_size>
 TimeCost wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, index_type source, bool verbose=false) {
     double start, end = 0, overhead = 0;
-    index_type* q = NULL;
+    index_type* worklist = NULL;
     index_type* scan_indices = NULL;
     index_type* touched = NULL;
     double setup_start = getTimeStamp();
-    check_cuda(cudaMalloc(&q, g.nnodes * sizeof(index_type)));
+    check_cuda(cudaMalloc(&worklist, g.nnodes * sizeof(index_type)));
     check_cuda(cudaMalloc(&touched, g.nnodes* sizeof(index_type)));
     check_cuda(cudaMalloc(&scan_indices, g.nnodes* sizeof(index_type)));
     setup_id<<<(g.nnodes + block_size - 1),block_size>>>(scan_indices,g.nnodes);
 
-    // Set first q entry to source
-    check_cuda(cudaMemcpy(q, &source, sizeof(index_type),cudaMemcpyHostToDevice));
-    index_type* qlen = NULL;
-    check_cuda(cudaMallocManaged(&qlen, sizeof(index_type)));
-    *qlen = 1;
+    // Set first worklist entry to source
+    check_cuda(cudaMemcpy(worklist, &source, sizeof(index_type),cudaMemcpyHostToDevice));
+    index_type* worklist_len = NULL;
+    check_cuda(cudaMallocManaged(&worklist_len, sizeof(index_type)));
+    *worklist_len = 1;
 
     void* flg_tmp_store = NULL;
     size_t flg_store_size = 0;
-    // index_type num_selected = 0;
-    cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,touched,q,qlen,g.nnodes);
+    cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,touched,worklist,worklist_len,g.nnodes);
     check_cuda(cudaMalloc(&flg_tmp_store,flg_store_size));
+    check_cuda(cudaMemset(touched,0,g.nnodes*sizeof(index_type)));
 
 
     start = getTimeStamp();
     overhead += start - setup_start;
-    while (*qlen) {
+    while (*worklist_len) {
         if (verbose) {
-            printf("Iter %d\n",*qlen);
+            printf("Iter %d\n",*worklist_len);
         }
-        index_type len = *qlen;
-        *qlen = 0;
+        index_type len = *worklist_len;
+        *worklist_len = 0;
  
-        wf_iter_simple<OutType::FILTER_COMPACT><<<(len + block_size - 1) / block_size,block_size>>>(d_g, d_dists, q, len, touched,NULL, NULL);
+        wf_iter_simple<OutType::FILTER_COMPACT><<<(len + block_size - 1) / block_size,block_size>>>(d_g, d_dists, worklist, len, touched,NULL, NULL);
 
-        cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,touched,q,qlen,g.nnodes);
+        cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,touched,worklist,worklist_len,g.nnodes);
         check_cuda(cudaMemset(touched,0,g.nnodes*sizeof(index_type)));
         cudaDeviceSynchronize();
     }
@@ -161,10 +160,10 @@ TimeCost wf_sweep_filter(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists, in
     double gpu_time = end - start;
     if (verbose) printf("GPU time: %f\n",gpu_time);
 
-    check_cuda(cudaFree(q));
+    check_cuda(cudaFree(worklist));
     check_cuda(cudaFree(touched));
     check_cuda(cudaFree(scan_indices));
-    check_cuda(cudaFree(qlen));
+    check_cuda(cudaFree(worklist_len));
     overhead += getTimeStamp() - end;
     return {gpu_time, overhead};
 }
@@ -237,7 +236,7 @@ TimeCost wf_sweep_simple_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_d, i
     check_cuda(cudaMalloc(&vertex_claim, g.nnodes* sizeof(index_type)));
     check_cuda(cudaMallocManaged(&worklist_len, sizeof(index_type)));
 
-    // Set first q entry to source
+    // Set first worklist entry to source
     check_cuda(cudaMemcpy(worklist1, &source, sizeof(index_type), cudaMemcpyHostToDevice));
     *worklist_len = 1;
 
@@ -445,6 +444,7 @@ TimeCost wf_sweep_full_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists,
         setup_id<<<(g.nnodes + block_size - 1),block_size>>>(scan_indices,g.nnodes);
         cub::DeviceSelect::Flagged(flg_tmp_store,flg_store_size,scan_indices,worklist1,worklist2,managed_length,g.nnodes);
         check_cuda(cudaMalloc(&flg_tmp_store,flg_store_size));
+        check_cuda(cudaMemset(worklist2,0,g.nnodes*sizeof(index_type)));
     }
 
     if (out_type == OutType::FILTER_IGNORE) {
@@ -454,6 +454,7 @@ TimeCost wf_sweep_full_coop(CSRGraph& g, CSRGraph& d_g, edge_data_type* d_dists,
 
     if (out_type == OutType::QUEUE || out_type == OutType::FRONTIER) {
         cudaMalloc(&vertex_claim, g.nnodes * sizeof(index_type));
+        check_cuda(cudaMemset(vertex_claim,0,g.nnodes*sizeof(index_type)));
     }
 
     // Set the source vertex
