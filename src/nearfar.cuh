@@ -2,7 +2,8 @@
 #define NEARFAR_H
 
 #include "csr.h"
+#include "utils.cuh"
 
-void nearfar(CSRGraph& g, edge_data_type* dists);
+TimeCost nearfar(CSRGraph &g, edge_data_type *dists);
 
 #endif // WORKFRONT_SWEEP_H

@@ -4,109 +4,18 @@
 
 const uint32_t nBuckets = 10;
 
-inline edge_data_type calculate_delta(CSRGraph g) {
-  // delta as warp size * average weight / average degree
-  // calcuate average edge weight
-  unsigned long ew = 0;
-  for (int i = 0; i < g.nedges; i++) {
-    ew += g.edge_data[i];
-  }
-  ew = ew / g.nedges;
-  // calculate average edge degree as total # of edges / total # of nodes
-  edge_data_type d = (g.nedges / g.nnodes);
-  printf("average degree %d, average weight %lu, delta %lu \n", d, ew,
-         32 * ew / d);
-  return 32 * ew / d;
-}
-
-
-__global__ void bucketing_iter(CSRGraph g, edge_data_type *d,
-                               edge_data_type delta, index_type *bucket,
-                               index_type bucket_len, index_type *near,
-                               index_type *near_len, index_type *far,
-                               index_type *far_len) {
-  index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
-
-  // only work on closest bucket pile
-  if (index < bucket_len) {
-    index_type s_idx = bucket[index];
-    // printf("index %u, node:%u, edges:%u\n", index, s_idx,
-    //        g.row_start[s_idx + 1]);
-    for (int j = g.row_start[s_idx]; j < g.row_start[s_idx + 1];
-         j++) {                           // range each edge for current node
-      edge_data_type w = d[s_idx];        // current approximation for departure
-                                          // node for current edge
-      edge_data_type ew = g.edge_data[j]; // the weight of current edge
-      index_type n = g.edge_dst[j];  // the destination node for current edge
-      edge_data_type nw = d[n];      // old approximation for node n
-      edge_data_type new_w = ew + w; // new approximation starting from j
-      // Check if the distance is already set to max then just take the max
-      // since,
-      if (w >= MAX_VAL) {
-        new_w = MAX_VAL;
-      }
-
-      if (new_w < nw) {
-        // printf("updated approximation for node %u, %u vs %u\n", n, new_w,
-        // nw);
-        atomicMin(&d[n], new_w);
-
-        // seperating into near and far pile
-        index_type q_idx;
-        if (new_w < delta) {
-          q_idx = atomicAdd(near_len, 1);
-          near[q_idx] = n;
-        } else {
-          q_idx = atomicAdd(far_len, 1); // ! could possibly cause far overflow
-          far[q_idx] = n;
-          // printf("put node %u into far pile, idx:%u\n", n, q_idx);
-        }
-      }
-    }
-  }
-}
-
-// split near pile into buckets
-__global__ void buckets_split(edge_data_type delta, edge_data_type *d_d,
-                              index_type *near, index_type *near_len,
-                              index_type *buckets, index_type *buckets_len,
-                              index_type each_bucket_cap) {
-  index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
-  if (index < *near_len) {
-    index_type n_idx = near[index];
-    edge_data_type w = d_d[n_idx];
-
-    edge_data_type base_delta = delta / 10;
-    edge_data_type bucket_idx = w / base_delta;
-    if (bucket_idx > nBuckets - 1) {
-      bucket_idx = nBuckets - 1;
-    }
-
-    // printf("buckets_split, index:%u, node_idx:%u, distance:%u,
-    // bucket_idx:%u\n",
-    //        index, n_idx, w, bucket_idx);
-    index_type q_idx = atomicAdd(&buckets_len[bucket_idx], 1);
-    index_type *bucket_start =
-        buckets +
-        bucket_idx * each_bucket_cap; // start of the corresponding bucket
-
-    *(bucket_start + q_idx) = n_idx; // ! possible overflow
-    // printf("Adding %d to bucket %u, q[%d]\n", n_idx, bucket_idx, q_idx);
-  }
-}
-
 __global__ inline void
-far_split(edge_data_type *d, edge_data_type delta, index_type *last_far_pile,
-          index_type *last_far_len, index_type *new_near_pile,
-          index_type *new_near_len, index_type *new_far_pile,
-          index_type *new_far_len) {
-  index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
+far_split(edge_data_type *best_cost, edge_data_type delta,
+          index_type *last_far_pile, index_type *last_far_len,
+          index_type *new_near_pile, index_type *new_near_len,
+          index_type *new_far_pile, index_type *new_far_len) {
+  index_type gidx = threadIdx.x + (blockDim.x * blockIdx.x);
   // only split far pile into near and far
-  if (index < *last_far_len) {
-    index_type far_idx = last_far_pile[index];
-    edge_data_type nw = d[far_idx];
-    // printf("index %d, far_idx %d, distance %d\n", index, far_idx, nw);
+  if (gidx < *last_far_len) {
+    index_type far_idx = last_far_pile[gidx];
+    edge_data_type nw = best_cost[far_idx];
     index_type q_idx;
+
     if (nw < delta) {
       q_idx = atomicAdd(new_near_len, 1);
       new_near_pile[q_idx] = far_idx;
@@ -114,19 +23,84 @@ far_split(edge_data_type *d, edge_data_type delta, index_type *last_far_pile,
       q_idx = atomicAdd(new_far_len, 1);
       new_far_pile[q_idx] = far_idx;
     }
-    // printf("Adding %d to q[%d]\n",n,q_idx);
   }
 }
 
-void bucketing(CSRGraph &g, edge_data_type *dists) {
-  double start, end = 0;
+__global__ void bucketing_iter(CSRGraph g, edge_data_type *best_cost,
+                               edge_data_type delta, index_type *bucket,
+                               index_type bucket_len, index_type *near,
+                               index_type *near_len, index_type *far,
+                               index_type *far_len) {
+  index_type gidx = threadIdx.x + (blockDim.x * blockIdx.x);
+
+  // only work on closest bucket pile
+  if (gidx < bucket_len) {
+    index_type s_idx = bucket[gidx];
+    for (int j = g.row_start[s_idx]; j < g.row_start[s_idx + 1];
+         j++) {                            // range each edge for current node
+      edge_data_type w = best_cost[s_idx]; // current approximation for
+                                           // departure node for current edge
+      edge_data_type ew = g.edge_data[j];  // the weight of current edge
+      index_type n = g.edge_dst[j];     // the destination node for current edge
+      edge_data_type nw = best_cost[n]; // old approximation for node n
+      edge_data_type new_w = ew + w;    // new approximation starting from j
+      // Check if the distance is already set to max then just take the max
+      // since,
+      if (w >= MAX_VAL) {
+        new_w = MAX_VAL;
+      }
+
+      if (new_w < nw) {
+        atomicMin(&best_cost[n], new_w);
+
+        // seperating into near and far pile
+        index_type q_idx;
+        if (new_w < delta) {
+          q_idx = atomicAdd(near_len, 1);
+          near[q_idx] = n;
+        } else {
+          q_idx = atomicAdd(far_len, 1);
+          far[q_idx] = n;
+        }
+      }
+    }
+  }
+}
+
+// split near pile into buckets
+__global__ void buckets_split(edge_data_type delta, edge_data_type *d_dists,
+                              index_type *near, index_type *near_len,
+                              index_type *buckets, index_type *buckets_len,
+                              index_type each_bucket_cap) {
+  index_type gidx = threadIdx.x + (blockDim.x * blockIdx.x);
+  if (gidx < *near_len) {
+    index_type n_idx = near[gidx];
+    edge_data_type w = d_dists[n_idx];
+
+    edge_data_type base_delta = delta / 10;
+    edge_data_type bucket_idx = w / base_delta;
+    if (bucket_idx > nBuckets - 1) {
+      bucket_idx = nBuckets - 1;
+    }
+
+    index_type q_idx = atomicAdd(&buckets_len[bucket_idx], 1);
+    index_type *bucket_start =
+        buckets +
+        bucket_idx * each_bucket_cap; // start of the corresponding bucket
+
+    *(bucket_start + q_idx) = n_idx;
+  }
+}
+
+TimeCost bucketing(CSRGraph &g, edge_data_type *dists) {
+  double start, end = 0, overhead = 0;
   CSRGraph d_g;
   g.copy_to_gpu(d_g);
-  edge_data_type *d_d = NULL;
-  check_cuda(cudaMalloc(&d_d, g.nnodes * sizeof(edge_data_type)));
+  edge_data_type *d_dists = NULL;
+  check_cuda(cudaMalloc(&d_dists, g.nnodes * sizeof(edge_data_type)));
   // Initialize for source node = 0. Otherwise need to change this
   check_cuda(
-      cudaMemset(&d_d[1], 0xFF, (g.nnodes - 1) * sizeof(edge_data_type)));
+      cudaMemset(&d_dists[1], 0xFF, (g.nnodes - 1) * sizeof(edge_data_type)));
 
   index_type *buckets = nullptr, *near = nullptr, *far = nullptr,
              *far2 = nullptr;
@@ -141,17 +115,11 @@ void bucketing(CSRGraph &g, edge_data_type *dists) {
   index_type each_bucket_cap = g.nedges;
   index_type bucket_total_cap = each_bucket_cap * nBuckets;
 
+  double setup_start = getTimeStamp();
   check_cuda(cudaMalloc(&buckets, bucket_total_cap * sizeof(index_type)));
   check_cuda(cudaMalloc(&near, g.nedges * sizeof(index_type)));
-  check_cuda(cudaMalloc(
-      &far,
-      g.nedges * 2 *
-          sizeof(index_type))); // ! how large does far need to avoid overflow ?
-  check_cuda(cudaMalloc(
-      &far2,
-      g.nedges * 2 *
-          sizeof(index_type))); // ! how large does far need to avoid overflow ?
-  printf("far size:%u\n", g.nedges * 2);
+  check_cuda(cudaMalloc(&far, g.nedges * 2 * sizeof(index_type)));
+  check_cuda(cudaMalloc(&far2, g.nedges * 2 * sizeof(index_type)));
 
   // Set first q entry to 0 (source) TODO: other sources
   check_cuda(cudaMemset(buckets, 0, sizeof(index_type)));
@@ -167,8 +135,8 @@ void bucketing(CSRGraph &g, edge_data_type *dists) {
     buckets_len[i] = 0;
   }
 
-  printf("weight %d \n", g.getWeight(0, 0));
   start = getTimeStamp();
+  overhead += start - setup_start;
 
   // calculate delta for graph
   edge_data_type delta = calculate_delta(g);
@@ -181,10 +149,6 @@ void bucketing(CSRGraph &g, edge_data_type *dists) {
   while (1) { // break on near pile processed and far pile is empty
     // keep processing buckets until all buckets are emtpy
     while (found_non_empty_bucket) {
-      printf("Iter %d, far batch %d, delta %d, current bucket:%u, current "
-             "bucket size:%u\n",
-             iter, *far_len, delta, bucket_idx, buckets_len[bucket_idx]);
-
       index_type current_bucket_len = buckets_len[bucket_idx];
 
       index_type *current_bucket =
@@ -192,37 +156,18 @@ void bucketing(CSRGraph &g, edge_data_type *dists) {
           bucket_idx * each_bucket_cap; // calculate the start of current bucket
 
       bucketing_iter<<<(current_bucket_len + 512 - 1) / 512, 512>>>(
-          d_g, d_d, delta, current_bucket, current_bucket_len, near, near_len,
-          far, far_len);
+          d_g, d_dists, delta, current_bucket, current_bucket_len, near,
+          near_len, far, far_len);
       cudaDeviceSynchronize();
-      // getchar();
-
-      cudaError_t err = cudaGetLastError();
-      if (err != cudaSuccess) {
-        printf("\033[0;31mBucketing iteration error: %s\033[0m\n",
-               cudaGetErrorString(err));
-        exit(1);
-      }
 
       // set current bucket size to 0 as they are all processed
       buckets_len[bucket_idx] = 0;
 
-      // todo: possibly compact near & near_dis?
-      // ? why do we need to sort here?
-
       // split near pile into buckets only when near pile is not empty
       if (*near_len > 0) {
         index_type griddim = (*near_len + 512 - 1) / 512;
-        // printf("calling buckets split, with griddim:%u\n", griddim);
-        buckets_split<<<griddim, 512>>>(delta, d_d, near, near_len, buckets,
+        buckets_split<<<griddim, 512>>>(delta, d_dists, near, near_len, buckets,
                                         buckets_len, each_bucket_cap);
-        cudaDeviceSynchronize();
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-          printf("\033[0;31mBucket split error: %s\033[0m\n",
-                 cudaGetErrorString(err));
-          exit(1);
-        }
         cudaDeviceSynchronize();
         // reset near len as near pile are distributed to buckets
         *near_len = 0;
@@ -256,7 +201,7 @@ void bucketing(CSRGraph &g, edge_data_type *dists) {
     while (*near_len < 1) {
       delta += delta;
       far_split<<<(*far_len + 512 - 1) / 512, 512>>>(
-          d_d, delta, far, far_len, near, near_len, far2, far2_len);
+          d_dists, delta, far, far_len, near, near_len, far2, far2_len);
       cudaDeviceSynchronize();
 
       index_type *tmp = far;
@@ -268,16 +213,14 @@ void bucketing(CSRGraph &g, edge_data_type *dists) {
     }
 
     // split near into buckets
-    // ? evenly split based on delta ?
     buckets_split<<<(*near_len + 512 - 1) / 512, 512>>>(
-        delta, d_d, near, near_len, buckets, buckets_len, each_bucket_cap);
+        delta, d_dists, near, near_len, buckets, buckets_len, each_bucket_cap);
     cudaDeviceSynchronize();
     // reset near len as near pile are distributed to buckets
     *near_len = 0;
 
     index_type min_len = 0, min_len_bucket = 0;
     for (index_type i = 0; i < nBuckets; ++i) {
-      // printf("bucket %u len %u\n", i, buckets_len[i]);
       if (buckets_len[i] > 0 &&
           (!found_non_empty_bucket || min_len > buckets_len[i])) {
         min_len = buckets_len[i];
@@ -291,8 +234,21 @@ void bucketing(CSRGraph &g, edge_data_type *dists) {
 
   end = getTimeStamp();
   double gpu_time = end - start;
-  printf("GPU time: %f\n", gpu_time);
 
-  cudaMemcpy(dists, d_d, g.nnodes * sizeof(edge_data_type),
+  check_cuda(cudaFree(buckets));
+  check_cuda(cudaFree(near));
+  check_cuda(cudaFree(far));
+  check_cuda(cudaFree(far2));
+  check_cuda(cudaFree(buckets_len));
+  check_cuda(cudaFree(near_len));
+  check_cuda(cudaFree(far_len));
+  check_cuda(cudaFree(far2_len));
+  overhead += getTimeStamp() - end;
+
+  cudaMemcpy(dists, d_dists, g.nnodes * sizeof(edge_data_type),
              cudaMemcpyDeviceToHost);
+
+  check_cuda(cudaFree(d_dists));
+
+  return {gpu_time, overhead};
 }

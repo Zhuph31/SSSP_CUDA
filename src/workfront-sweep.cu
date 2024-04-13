@@ -1,6 +1,7 @@
+#include "utils.cuh"
 #include "workfront-sweep.cuh"
-#include <cub/device/device_select.cuh>
 #include <cub/block/block_scan.cuh>
+#include <cub/device/device_select.cuh>
 
 enum OutType {
     QUEUE,
@@ -8,16 +9,6 @@ enum OutType {
     FILTER_IGNORE,
     FRONTIER
 };
-
-
-struct TimeCost{
-  double gpu_time;
-  double overhead;
-  TimeCost () = default;
-  TimeCost(double g, double o) : gpu_time(g), overhead(o) {}
-};
-
-
 
 /////////////// ATOMIC QUEUE //////////////////
 
