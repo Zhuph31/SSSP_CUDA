@@ -3,30 +3,29 @@
 
 #include <stdio.h>
 
-__global__ void bf_iter(CSRGraph g, edge_data_type* last_d, edge_data_type* new_d) {
-    index_type index = threadIdx.x + (blockDim.x * blockIdx.x);
+__global__ void bf_iter(CSRGraph g, edge_data_type* last_cost, edge_data_type* new_cost) {
+    index_type source_vtx = threadIdx.x + (blockDim.x * blockIdx.x);
 
-    if (index < g.nnodes) {
-        // Only process nodes that changed last time
-        if (last_d[index] == new_d[index]) {
+    if (source_vtx < g.nnodes) {
+        // Only process nodes that changed last time, otherwise it runs forever
+        if (last_cost[source_vtx] == new_cost[source_vtx]) {
             return;
         }
-        atomicMin(&new_d[index], last_d[index]);
+        atomicMin(&new_cost[source_vtx], last_cost[source_vtx]);
 
-        // somewhat baed on https://towardsdatascience.com/bellman-ford-single-source-shortest-path-algorithm-on-gpu-using-cuda-a358da20144b
-        for (int j = g.row_start[index]; j < g.row_start[index + 1]; j++) {
-            edge_data_type w = last_d[index];
-            edge_data_type ew = g.edge_data[j];
-            index_type n = g.edge_dst[j];
-            edge_data_type nw = last_d[n];
-            edge_data_type new_w = ew + w;
+        for (int e = g.row_start[source_vtx]; e < g.row_start[source_vtx + 1]; e++) {
+            edge_data_type source_cost = last_cost[source_vtx];
+            edge_data_type edge_weight = g.edge_data[e];
+            index_type dest_vtx = g.edge_dst[e];
+            edge_data_type old_dest_cost = last_cost[dest_vtx];
+            edge_data_type new_dest_cost = edge_weight + source_cost;
             // Check if the distance is already set to max then just take the max since,
-            if (w >= MAX_VAL){
-                new_w = MAX_VAL;
+            if (source_cost >= MAX_VAL){
+                new_dest_cost = MAX_VAL;
             }
 
-            if (new_w < nw) {
-                atomicMin(&new_d[n],new_w);
+            if (new_dest_cost < old_dest_cost) {
+                atomicMin(&new_cost[dest_vtx],new_dest_cost);
             }
         }
     }

@@ -1,4 +1,5 @@
 /*
+Adapted from:
    csr_graph.h
 
    Implements a CSR Graph. Part of the GGC source code. 
@@ -19,9 +20,7 @@
 #include <assert.h>
 
 
-// Adapted from LSG CSRGraph.h
-
-// very simple implementation
+// very simple and stripped down implementation
 struct CSRGraph {
   unsigned read(char file[]);
   void copy_to_gpu(struct CSRGraph &copygraph);

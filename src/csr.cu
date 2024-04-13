@@ -1,3 +1,17 @@
+/*
+Adapted from:
+   csr_graph.h
+
+   Implements a CSR Graph. Part of the GGC source code. 
+   Interface derived from LonestarGPU.
+
+   Copyright (C) 2014--2016, The University of Texas at Austin
+
+   See LICENSE.TXT for copyright license.
+
+   Author: Sreepathi Pai <sreepai@ices.utexas.edu> 
+*/
+
 #include "csr.h"
 
 #include <fstream>
