@@ -1,5 +1,6 @@
 #pragma once
 
 #include "csr.h"
+#include "utils.cuh"
 
-void bucketing(CSRGraph &g, edge_data_type *dists);
+TimeCost bucketing(CSRGraph &g, edge_data_type *dists);

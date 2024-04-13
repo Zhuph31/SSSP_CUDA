@@ -23,4 +23,4 @@ make
 After compilation, you can execute the `sssp` program using the following command:
 
 ```bash
-./sssp <path to gr file>
+./sssp path/to/input/graph.gr
