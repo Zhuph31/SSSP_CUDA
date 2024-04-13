@@ -13,10 +13,10 @@ far_split(edge_data_type *best_cost, edge_data_type delta,
   // only split far pile into near and far
   if (gidx < *last_far_len) {
     index_type far_idx = last_far_pile[gidx];
-    edge_data_type nw = best_cost[far_idx];
+    edge_data_type old_dest_cost = best_cost[far_idx];
     index_type q_idx;
 
-    if (nw < delta) {
+    if (old_dest_cost < delta) {
       q_idx = atomicAdd(new_near_len, 1);
       new_near_pile[q_idx] = far_idx;
     } else {
@@ -38,29 +38,29 @@ __global__ void bucketing_iter(CSRGraph g, edge_data_type *best_cost,
     index_type s_idx = bucket[gidx];
     for (int j = g.row_start[s_idx]; j < g.row_start[s_idx + 1];
          j++) {                            // range each edge for current node
-      edge_data_type w = best_cost[s_idx]; // current approximation for
+      edge_data_type source_cost = best_cost[s_idx]; // current approximation for
                                            // departure node for current edge
-      edge_data_type ew = g.edge_data[j];  // the weight of current edge
-      index_type n = g.edge_dst[j];     // the destination node for current edge
-      edge_data_type nw = best_cost[n]; // old approximation for node n
-      edge_data_type new_w = ew + w;    // new approximation starting from j
+      edge_data_type edge_weight = g.edge_data[j];  // the weight of current edge
+      index_type dest_vtx = g.edge_dst[j];     // the destination node for current edge
+      edge_data_type old_dest_cost = best_cost[dest_vtx]; // old approximation for node dest_vtx
+      edge_data_type new_dest_cost = edge_weight + source_cost;    // new approximation starting from j
       // Check if the distance is already set to max then just take the max
       // since,
-      if (w >= MAX_VAL) {
-        new_w = MAX_VAL;
+      if (source_cost >= MAX_VAL) {
+        new_dest_cost = MAX_VAL;
       }
 
-      if (new_w < nw) {
-        atomicMin(&best_cost[n], new_w);
+      if (new_dest_cost < old_dest_cost) {
+        atomicMin(&best_cost[dest_vtx], new_dest_cost);
 
         // seperating into near and far pile
         index_type q_idx;
-        if (new_w < delta) {
+        if (new_dest_cost < delta) {
           q_idx = atomicAdd(near_len, 1);
-          near[q_idx] = n;
+          near[q_idx] = dest_vtx;
         } else {
           q_idx = atomicAdd(far_len, 1);
-          far[q_idx] = n;
+          far[q_idx] = dest_vtx;
         }
       }
     }
@@ -75,10 +75,10 @@ __global__ void buckets_split(edge_data_type delta, edge_data_type *d_dists,
   index_type gidx = threadIdx.x + (blockDim.x * blockIdx.x);
   if (gidx < *near_len) {
     index_type n_idx = near[gidx];
-    edge_data_type w = d_dists[n_idx];
+    edge_data_type source_cost = d_dists[n_idx];
 
     edge_data_type base_delta = delta / 10;
-    edge_data_type bucket_idx = w / base_delta;
+    edge_data_type bucket_idx = source_cost / base_delta;
     if (bucket_idx > nBuckets - 1) {
       bucket_idx = nBuckets - 1;
     }

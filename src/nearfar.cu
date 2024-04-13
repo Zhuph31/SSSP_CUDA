@@ -11,30 +11,30 @@ __global__ void nf_iter(CSRGraph g, edge_data_type *best_cost,
   if (gidx < last_near_len) {
     index_type s_idx = last_near_pile[gidx];
     for (int j = g.row_start[s_idx]; j < g.row_start[s_idx + 1]; j++) {
-      edge_data_type w = best_cost[s_idx];
-      edge_data_type ew = g.edge_data[j];
-      index_type n = g.edge_dst[j];
-      edge_data_type nw = best_cost[n];
-      edge_data_type new_w = ew + w;
+      edge_data_type source_cost = best_cost[s_idx];
+      edge_data_type edge_weight = g.edge_data[j];
+      index_type dest_vtx = g.edge_dst[j];
+      edge_data_type old_dest_cost = best_cost[dest_vtx];
+      edge_data_type new_dest_cost = edge_weight + source_cost;
       // Check if the distance is already set to max then just take the max
       // since,
-      if (w >= MAX_VAL) {
-        new_w = MAX_VAL;
+      if (source_cost >= MAX_VAL) {
+        new_dest_cost = MAX_VAL;
       }
 
-      if (new_w < nw) {
-        atomicMin(&best_cost[n], new_w);
+      if (new_dest_cost < old_dest_cost) {
+        atomicMin(&best_cost[dest_vtx], new_dest_cost);
         // seperating into near and far pile
         index_type q_idx;
-        if (new_w < delta) {
+        if (new_dest_cost < delta) {
           // near pile, this value has been updated. Flag this value need to be
           // thrown out in far pile
-          atomicAdd(&scratch[n], 1);
+          atomicAdd(&scratch[dest_vtx], 1);
           q_idx = atomicAdd(new_near_len, 1);
-          new_near_pile[q_idx] = n;
+          new_near_pile[q_idx] = dest_vtx;
         } else {
           q_idx = atomicAdd(new_far_len, 1);
-          new_far_pile[q_idx] = n;
+          new_far_pile[q_idx] = dest_vtx;
         }
       }
     }
@@ -50,13 +50,13 @@ __global__ void far_split(edge_data_type *best_cost, edge_data_type delta,
   // only split far pile into near and far
   if (gidx < last_far_len) {
     index_type far_idx = last_far_pile[gidx];
-    edge_data_type nw = best_cost[far_idx];
+    edge_data_type old_dest_cost = best_cost[far_idx];
     index_type q_idx;
 
     // remove duplicates in the far pile, and remove flagged invalid edge from
     // near pile update
     if (atomicCAS(&scratch[far_idx], 0, 1) == 0) {
-      if (nw <= delta) {
+      if (old_dest_cost <= delta) {
         q_idx = atomicAdd(new_near_len, 1);
         new_near_pile[q_idx] = far_idx;
       } else {
